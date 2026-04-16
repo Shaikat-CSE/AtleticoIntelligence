@@ -49,6 +49,7 @@ class CameraCalibrator:
         self.pitch = pitch_dimensions or PitchDimensions()
         self._homography: Optional[np.ndarray] = None
         self._inverse_homography: Optional[np.ndarray] = None
+        self._vanishing_point: Optional[Tuple[float, float]] = None
         
     def calibrate_from_points(
         self, 
@@ -70,7 +71,6 @@ class CameraCalibrator:
             return self._create_invalid_result()
         
         try:
-            # Calculate homography using RANSAC for robustness
             H, mask = cv2.findHomography(
                 image_points.astype(np.float32),
                 pitch_points.astype(np.float32),
@@ -82,7 +82,6 @@ class CameraCalibrator:
                 logger.error("Failed to compute homography matrix")
                 return self._create_invalid_result()
             
-            # Calculate inverse homography
             H_inv = np.linalg.inv(H)
             
             # Calculate reprojection error
@@ -110,6 +109,7 @@ class CameraCalibrator:
             
             self._homography = H
             self._inverse_homography = H_inv
+            self._vanishing_point = vanishing_point
             
             logger.info(f"Camera calibrated successfully. Reprojection error: {error:.2f}m")
             
@@ -133,6 +133,7 @@ class CameraCalibrator:
     ) -> CalibrationResult:
         """
         Attempt automatic calibration from pitch lines in image.
+        Works with partial pitch view by detecting vanishing points.
         
         Args:
             image: Input image
@@ -141,23 +142,141 @@ class CameraCalibrator:
         Returns:
             CalibrationResult
         """
+        h, w = image.shape[:2]
+        
         if detected_lines is None:
             detected_lines = self._detect_pitch_lines(image)
         
-        if len(detected_lines) < 4:
-            logger.warning("Insufficient pitch lines for auto-calibration, using default")
-            return self._default_calibration(image.shape)
+        logger.info(f"Detected {len(detected_lines)} pitch lines")
         
-        # Try to identify key pitch lines (sidelines, goal lines, center line)
-        h, w = image.shape[:2]
+        if len(detected_lines) >= 4:
+            corners = self._extract_pitch_corners_from_lines(detected_lines, image)
+            if corners is not None and len(corners) >= 4:
+                image_points = np.array(corners[:4], dtype=np.float32)
+                pitch_points = np.array([
+                    [0, 0],
+                    [self.pitch.width, 0],
+                    [self.pitch.width, self.pitch.height],
+                    [0, self.pitch.height]
+                ], dtype=np.float32)
+                logger.info(f"Auto-calibration using detected corners: {corners}")
+                result = self.calibrate_from_points(image_points, pitch_points)
+                if result.reprojection_error < 10.0:  # Only use if error is reasonable
+                    return result
+                logger.warning(f"Calibration reprojection error too high ({result.reprojection_error:.1f}m), falling back to heuristic")
         
-        # Use heuristic: assume image shows roughly centered view
-        # Map image corners to pitch corners as initial estimate
+        if len(detected_lines) >= 2:
+            H = self._estimate_perspective_from_partial_view(detected_lines, image.shape)
+            if H is not None:
+                H_inv = np.linalg.inv(H)
+                vanishing = (float(w * 0.5), float(h * 0.2))
+                self._vanishing_point = vanishing
+                self._homography = H
+                self._inverse_homography = H_inv
+                corners_image = cv2.perspectiveTransform(
+                    np.array([[[0, 0]], [[105, 0]], [[105, 68]], [[0, 68]]], dtype=np.float32),
+                    H_inv
+                ).reshape(-1, 2)
+                
+                logger.info("Auto-calibration using vanishing point estimation")
+                return CalibrationResult(
+                    homography_matrix=H,
+                    inverse_homography=H_inv,
+                    vanishing_point=vanishing,
+                    pitch_corners_image=corners_image,
+                    reprojection_error=3.0,
+                    is_valid=True
+                )
+        
+        logger.warning("Insufficient pitch lines for auto-calibration, using heuristic estimate")
+        return self._heuristic_calibration(image.shape)
+    
+    def _detect_pitch_lines(
+        self, 
+        image: np.ndarray
+    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """Detect white pitch lines in the image using improved detection."""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        blurred = cv2.bilateralFilter(gray, 5, 50, 50)
+        
+        edges = cv2.Canny(blurred, 30, 100, apertureSize=3)
+        
+        lines = cv2.HoughLinesP(
+            edges, 
+            rho=1, 
+            theta=np.pi/180, 
+            threshold=30,
+            minLineLength=min(image.shape[:2]) // 10,
+            maxLineGap=50
+        )
+        
+        detected = []
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+                if length < 30:
+                    continue
+                    
+                angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+                if angle > 85 or angle < 5:
+                    mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+                    if 0 <= mid_x < image.shape[1] and 0 <= mid_y < image.shape[0]:
+                        color = image[mid_y, mid_x]
+                        brightness = np.mean(color)
+                        if brightness > 80:
+                            detected.append(((float(x1), float(y1)), (float(x2), float(y2))))
+        
+        return detected
+    
+    def _estimate_perspective_from_partial_view(
+        self,
+        lines: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+        image_shape: Tuple[int, ...]
+    ) -> Optional[np.ndarray]:
+        """Estimate homography from partial pitch view using vanishing points.
+        
+        Even with partial pitch view, we can estimate perspective by:
+        1. Finding vanishing points (intersection of parallel lines)
+        2. Using horizon line to establish camera tilt
+        3. Mapping detected lines to expected pitch geometry
+        """
+        if len(lines) < 2:
+            return None
+        
+        h, w = image_shape[:2]
+        
+        horizontal_lines = []
+        vertical_lines = []
+        
+        for (x1, y1), (x2, y2) in lines:
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle < 10:
+                horizontal_lines.append(((x1, y1), (x2, y2)))
+            elif angle > 80:
+                vertical_lines.append(((x1, y1), (x2, y2)))
+        
+        vanishing_point = None
+        if len(vertical_lines) >= 2:
+            vanishing_point = self._find_vanishing_point(vertical_lines)
+        
+        horizon_y = h * 0.3
+        if vanishing_point:
+            horizon_y = vanishing_point[1]
+        
+        pitch_top = max(horizon_y, h * 0.15)
+        
+        visible_pitch_height = h - pitch_top
+        visible_pitch_width = visible_pitch_height * (self.pitch.width / self.pitch.height)
+        
+        center_x = w / 2
+        
         image_points = np.array([
-            [w * 0.2, h * 0.3],   # Top-left (left sideline, far)
-            [w * 0.8, h * 0.3],   # Top-right (right sideline, far)
-            [w * 0.8, h * 0.8],   # Bottom-right (right sideline, near)
-            [w * 0.2, h * 0.8],   # Bottom-left (left sideline, near)
+            [float(center_x - visible_pitch_width/2), float(pitch_top)],
+            [float(center_x + visible_pitch_width/2), float(pitch_top)],
+            [float(center_x + visible_pitch_width/2), float(h)],
+            [float(center_x - visible_pitch_width/2), float(h)],
         ], dtype=np.float32)
         
         pitch_points = np.array([
@@ -167,41 +286,95 @@ class CameraCalibrator:
             [0, self.pitch.height]
         ], dtype=np.float32)
         
-        return self.calibrate_from_points(image_points, pitch_points)
+        H, _ = cv2.findHomography(image_points, pitch_points, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+        
+        return H
     
-    def _detect_pitch_lines(
-        self, 
+    def _find_vanishing_point(
+        self,
+        lines: List[Tuple[Tuple[float, float], Tuple[float, float]]]
+    ) -> Optional[Tuple[float, float]]:
+        """Find vanishing point by intersecting parallel lines."""
+        if len(lines) < 2:
+            return None
+        
+        intersections = []
+        for i in range(len(lines)):
+            for j in range(i + 1, len(lines)):
+                p1 = self._line_intersection(
+                    np.array(lines[i][0]),
+                    np.array(lines[i][1]),
+                    np.array(lines[j][0]),
+                    np.array(lines[j][1])
+                )
+                if p1 is not None:
+                    intersections.append(p1)
+        
+        if not intersections:
+            return None
+        
+        intersections = np.array(intersections)
+        median_x = np.median(intersections[:, 0])
+        median_y = np.median(intersections[:, 1])
+        
+        return (float(median_x), float(median_y))
+    
+    def _extract_pitch_corners_from_lines(
+        self,
+        lines: List[Tuple[Tuple[float, float], Tuple[float, float]]],
         image: np.ndarray
-    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
-        """Detect white pitch lines in the image."""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ) -> Optional[List[Tuple[float, float]]]:
+        """Extract the four corners of the pitch from detected lines using line intersections."""
+        if len(lines) < 4:
+            return None
         
-        # Edge detection
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        h, w = image.shape[:2]
+        min_dist = w * 0.1  # Minimum distance between corners
         
-        # Hough line transform
-        lines = cv2.HoughLinesP(
-            edges, 
-            rho=1, 
-            theta=np.pi/180, 
-            threshold=100,
-            minLineLength=min(image.shape[:2]) // 4,
-            maxLineGap=20
-        )
+        all_points = []
+        for (x1, y1), (x2, y2) in lines:
+            all_points.append((float(x1), float(y1)))
+            all_points.append((float(x2), float(y2)))
         
-        detected = []
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                # Filter by color - pitch lines are white/bright
-                mid_x, mid_y = int((x1 + x2) / 2), int((y1 + y2) / 2)
-                if 0 <= mid_x < image.shape[1] and 0 <= mid_y < image.shape[0]:
-                    color = image[mid_y, mid_x]
-                    brightness = np.mean(color)
-                    if brightness > 150:  # Bright line
-                        detected.append(((x1, y1), (x2, y2)))
+        if len(all_points) < 4:
+            return None
         
-        return detected
+        all_points = np.array(all_points)
+        
+        x_min, x_max = np.min(all_points[:, 0]), np.max(all_points[:, 0])
+        y_min, y_max = np.min(all_points[:, 1]), np.max(all_points[:, 1])
+        
+        candidates = [
+            (x_min, y_min),
+            (x_max, y_min),
+            (x_max, y_max),
+            (x_min, y_max)
+        ]
+        
+        corners = []
+        for corner in candidates:
+            is_duplicate = False
+            for existing in corners:
+                if np.linalg.norm(np.array(corner) - np.array(existing)) < min_dist:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                corners.append(corner)
+        
+        if len(corners) >= 4:
+            corners = corners[:4]
+            xs = [c[0] for c in corners]
+            ys = [c[1] for c in corners]
+            
+            ordered = []
+            ordered.append(corners[np.argmin([c[0] + c[1] for c in corners])])
+            ordered.append(corners[np.argmax([c[0] - c[1] for c in corners])])
+            ordered.append(corners[np.argmax([c[0] + c[1] for c in corners])])
+            ordered.append(corners[np.argmin([c[0] - c[1] for c in corners])])
+            
+            return ordered
+        
+        return None
     
     def _compute_vanishing_point(
         self, 
@@ -256,16 +429,26 @@ class CameraCalibrator:
         
         return (x, y)
     
-    def _default_calibration(self, image_shape: Tuple[int, ...]) -> CalibrationResult:
-        """Create a default calibration when auto-calibration fails."""
+    def _heuristic_calibration(self, image_shape: Tuple[int, ...]) -> CalibrationResult:
+        """Create a heuristic calibration when auto-calibration fails.
+        
+        Uses a trapezoid perspective: top of pitch appears narrower (typical broadcast view).
+        Maps image corners to pitch corners with realistic perspective distortion.
+        """
         h, w = image_shape[:2]
         
-        # Assume standard broadcast view
+        l_top = int(w * 0.12)
+        r_top = int(w * 0.88)
+        l_bottom = int(w * 0.02)
+        r_bottom = int(w * 0.98)
+        t = int(h * 0.12)
+        b = int(h * 0.95)
+        
         image_points = np.array([
-            [w * 0.1, h * 0.2],
-            [w * 0.9, h * 0.2],
-            [w * 0.9, h * 0.9],
-            [w * 0.1, h * 0.9],
+            [float(l_top), float(t)],
+            [float(r_top), float(t)],
+            [float(r_bottom), float(b)],
+            [float(l_bottom), float(b)],
         ], dtype=np.float32)
         
         pitch_points = np.array([
@@ -276,7 +459,7 @@ class CameraCalibrator:
         ], dtype=np.float32)
         
         result = self.calibrate_from_points(image_points, pitch_points)
-        logger.warning("Using default calibration - results may be inaccurate")
+        logger.warning("Using heuristic calibration - results may be inaccurate. Provide manual calibration points for best accuracy.")
         return result
     
     def _create_invalid_result(self) -> CalibrationResult:
@@ -331,50 +514,97 @@ class CameraCalibrator:
 class PerspectiveCorrector:
     """Corrects for perspective distortion in offside calculations."""
     
-    def __init__(self, calibration: CalibrationResult):
+    def __init__(self, calibration: CalibrationResult, pitch_height: float = 68.0):
         self.calibration = calibration
+        self.pitch_height = pitch_height
         
     def get_offside_line_points(
         self, 
         defender_x_position: float,
-        image_height: int
-    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        image_height: int,
+        image_width: int = 1920
+    ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
         """
         Get the offside line endpoints in image coordinates.
+        
+        Draws a line parallel to the pitch lines (vertical in pitch coords)
+        at the defender's x position, transformed to image perspective.
         
         Args:
             defender_x_position: Defender's x position in pitch coordinates (meters)
             image_height: Height of the image in pixels
+            image_width: Width of the image in pixels
             
         Returns:
-            Tuple of (top_point, bottom_point) in image coordinates
+            Tuple of (top_point, bottom_point) in image coordinates, or None if invalid
         """
-        if not self.calibration.is_valid or len(self.calibration.pitch_corners_image) == 0:
-            # Fallback to vertical line
-            return ((defender_x_position, 0), (defender_x_position, image_height))
+        if not self.calibration.is_valid:
+            return None
         
         try:
-            # Get pitch height from corners
-            pitch_height = self.calibration.pitch_corners_image.mean(axis=0)[1] if len(self.calibration.pitch_corners_image.shape) > 1 else 68.0
+            defender_x = float(defender_x_position)
+            if np.isnan(defender_x) or np.isnan(defender_x):
+                return None
             
-            # Get top and bottom of offside line using homography
-            top_pitch = np.array([[defender_x_position, 0]], dtype=np.float32)
-            bottom_pitch = np.array([[defender_x_position, pitch_height]], dtype=np.float32)
+            pitch_top = np.array([[defender_x, 0]], dtype=np.float32)
+            pitch_bottom = np.array([[defender_x, self.pitch_height]], dtype=np.float32)
             
             top_image = cv2.perspectiveTransform(
-                top_pitch.reshape(-1, 1, 2),
+                pitch_top.reshape(-1, 1, 2),
                 self.calibration.inverse_homography
             )[0][0]
             
             bottom_image = cv2.perspectiveTransform(
-                bottom_pitch.reshape(-1, 1, 2),
+                pitch_bottom.reshape(-1, 1, 2),
                 self.calibration.inverse_homography
             )[0][0]
             
+            if (np.isnan(top_image[0]) or np.isnan(top_image[1]) or
+                np.isnan(bottom_image[0]) or np.isnan(bottom_image[1])):
+                return None
+            
             return (tuple(top_image), tuple(bottom_image))
         except Exception as e:
-            logger.warning(f"Failed to compute offside line: {e}, using fallback")
-            return ((defender_x_position, 0), (defender_x_position, image_height))
+            logger.warning(f"Failed to compute offside line: {e}")
+            return None
+    
+    def get_perspective_offside_line(
+        self,
+        defender_x_position: float,
+        image_shape: Tuple[int, int]
+    ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """
+        Get offside line that stays within the visible pitch area.
+        
+        Instead of going from pitch y=0 to y=pitch_height (full pitch),
+        we interpolate the line endpoints from where the offside x intersects
+        the visible pitch boundaries in the image.
+        """
+        if not self.calibration.is_valid:
+            return None
+        
+        try:
+            h, w = image_shape
+            defender_x = float(defender_x_position)
+            
+            if np.isnan(defender_x):
+                return None
+            
+            line_points = []
+            for pitch_y in np.linspace(0, self.pitch_height, 20):
+                pt = np.array([[[defender_x, pitch_y]]], dtype=np.float32)
+                img_pt = cv2.perspectiveTransform(pt, self.calibration.inverse_homography)[0][0]
+                if 0 <= img_pt[0] <= w and 0 <= img_pt[1] <= h:
+                    line_points.append((float(img_pt[0]), float(img_pt[1])))
+            
+            if len(line_points) >= 2:
+                line_points.sort(key=lambda p: p[1])
+                return (line_points[0], line_points[-1])
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to compute perspective offside line: {e}")
+            return None
     
     def compare_player_positions(
         self,

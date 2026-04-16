@@ -16,6 +16,8 @@ CLAUDE.md
 .agent-mem/
 .agents/
 .cursor/
+.kilo/
+.kilocode/
 
 # Python / backend
 __pycache__/

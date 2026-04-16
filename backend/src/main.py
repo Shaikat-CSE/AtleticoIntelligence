@@ -59,10 +59,8 @@ def create_app() -> FastAPI:
                 "K-means team separation by jersey color",
                 "Automatic camera calibration with homography",
                 "Perspective-corrected offside calculation",
-                "Real-world pitch coordinates (meters)",
-                "LLM-generated explanations (post-detection only)"
-            ],
-            "note": "LLM is used ONLY for explanations, NOT for detection. Detection uses geometric calculations."
+                "Real-world pitch coordinates (meters)"
+            ]
         }
 
     @app.get("/health")

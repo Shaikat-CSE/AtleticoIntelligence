@@ -3,7 +3,6 @@ from .offside_analyzer import (
     GeometricOffsideAnalyzer,
     OffsideAnalysisResult,
     analyze_offside,
-    PlayerPosition
 )
 from .camera_calibration import (
     CameraCalibrator,
@@ -23,7 +22,6 @@ __all__ = [
     "OffsideAnalyzer",
     "OffsideAnalysisResult",
     "analyze_offside",
-    "PlayerPosition",
     "CameraCalibrator",
     "CalibrationResult",
     "PerspectiveCorrector",

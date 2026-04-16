@@ -17,7 +17,6 @@ class PitchVisualizer:
         attacker_color: Tuple[int, int, int] = (255, 0, 0),  # Red
         defender_color: Tuple[int, int, int] = (0, 0, 255),  # Blue
         ball_color: Tuple[int, int, int] = (0, 255, 0),      # Green
-        offside_line_color: Tuple[int, int, int] = (0, 255, 255),  # Cyan
         text_color: Tuple[int, int, int] = (255, 255, 255),  # White
     ):
         self.output_dir = Path(output_dir)
@@ -26,7 +25,6 @@ class PitchVisualizer:
         self.attacker_color = attacker_color
         self.defender_color = defender_color
         self.ball_color = ball_color
-        self.offside_line_color = offside_line_color
         self.text_color = text_color
 
     def annotate_frame(
@@ -166,31 +164,13 @@ class PitchVisualizer:
         cv2.circle(image, (dx, dy), 20, self.defender_color, 3)
         cv2.putText(
             image,
-            "2ND DEF",
+            "DEFENDER",
             (dx - 40, dy - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             self.defender_color,
             2
         )
-
-        # Draw offside line
-        if offside_result.offside_line_image:
-            # Use perspective-corrected line from calibration
-            top_point, bottom_point = offside_result.offside_line_image
-            pt1 = (int(top_point[0]), int(top_point[1]))
-            pt2 = (int(bottom_point[0]), int(bottom_point[1]))
-            cv2.line(image, pt1, pt2, self.offside_line_color, 3)
-        else:
-            # Fallback to vertical line at defender's x position
-            defender_x = int(defender.foot_position[0])
-            cv2.line(
-                image,
-                (defender_x, 0),
-                (defender_x, image_height),
-                self.offside_line_color,
-                2
-            )
 
         # Draw decision text
         decision = offside_result.decision
@@ -337,21 +317,6 @@ class PitchVisualizer:
                     self.ball_color, 
                     1
                 )
-
-        # Draw offside line
-        if offside_line_top and offside_line_bottom:
-            top_x, top_y = int(offside_line_top[0]), int(offside_line_top[1])
-            bottom_x, bottom_y = int(offside_line_bottom[0]), int(offside_line_bottom[1])
-            cv2.line(
-                annotated, 
-                (top_x, top_y), 
-                (bottom_x, bottom_y), 
-                self.offside_line_color, 
-                3
-            )
-        elif offside_line_x is not None:
-            lx = int(offside_line_x)
-            cv2.line(annotated, (lx, 0), (lx, h), self.offside_line_color, 3)
 
         # Draw decision
         decision_color = (0, 0, 255) if decision == "OFFSIDE" else (0, 255, 0)

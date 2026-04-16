@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -10,7 +10,7 @@ import logging
 
 from ..detection import create_detector, BoundingBox
 from ..logic import separate_teams, analyze_offside, CameraCalibrator, create_calibrator
-from ..visualization import annotate_frame, generate_offside_svg, generate_llm_explanation
+from ..visualization import annotate_frame, generate_offside_svg
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class DetectorState:
     def get(self):
         if self._detector is None:
             logger.info("Initializing YOLO detector...")
-            self._detector = create_detector("yolov8n.pt", confidence_threshold=0.25)
+            self._detector = create_detector("yolov8n.pt", confidence_threshold=0.25, ball_confidence_threshold=0.05)
         return self._detector
 
 
@@ -73,7 +73,8 @@ detector_state = DetectorState()
 def process_frame_analysis(
     image: np.ndarray, 
     goal_direction: str = "right",
-    calibrator: Optional[CameraCalibrator] = None
+    calibrator: Optional[CameraCalibrator] = None,
+    attacking_team: Optional[str] = None
 ) -> dict:
     """
     Process a frame through the geometric offside detection pipeline.
@@ -82,6 +83,7 @@ def process_frame_analysis(
         image: Input image
         goal_direction: Direction of opponent's goal ("left" or "right")
         calibrator: Optional pre-calibrated camera
+        attacking_team: Optional "team1" or "team2" to manually specify attacking team
         
     Returns:
         Dictionary with analysis results and file paths
@@ -145,13 +147,20 @@ def process_frame_analysis(
         calibrator = create_calibrator(image)
         logger.info("[Calibration] Auto-calibrated camera")
     
+    # Get ball position if detected
+    ball_pos = detection_result.ball.foot_position if detection_result.ball else None
+    if ball_pos:
+        logger.info(f"[Ball] Ball position: ({ball_pos[0]:.0f}, {ball_pos[1]:.0f})")
+    
     # Step 4: Geometric offside analysis with perspective correction
     offside_result = analyze_offside(
         team1, 
         team2, 
         goal_direction=goal_direction,
         image=image,
-        calibrator=calibrator
+        calibrator=calibrator,
+        ball_position=ball_pos,
+        attacking_team=attacking_team
     )
     
     file_id = str(uuid.uuid4())[:8]
@@ -168,57 +177,80 @@ def process_frame_analysis(
     annotated_url = f"/annotated/{annotated_filename}"
     
     # Step 6: Generate SVG visualization
-    svg_filename = f"pitch_{file_id}.svg"
+    import time
+    svg_filename = f"pitch_{file_id}_{goal_direction}_{int(time.time())}.svg"
     svg_path = OUTPUT_DIR / svg_filename
     
-    # Use pitch coordinates if available, otherwise image coordinates
-    if offside_result.attacker_pitch_pos:
-        attacker_pos = offside_result.attacker_pitch_pos
-        defender_pos = offside_result.defender_pitch_pos
-        # Transform team positions to pitch coordinates
-        team1_positions = []
-        team2_positions = []
-        for p in team1:
-            pitch_pos = calibrator.image_to_pitch(p.foot_position) if calibrator._homography is not None else p.foot_position
-            team1_positions.append(pitch_pos)
-        for p in team2:
-            pitch_pos = calibrator.image_to_pitch(p.foot_position) if calibrator._homography is not None else p.foot_position
-            team2_positions.append(pitch_pos)
-    else:
-        attacker_pos = offside_result.attacker.foot_position
-        defender_pos = offside_result.second_last_defender.foot_position
-        team1_positions = [p.foot_position for p in team1]
-        team2_positions = [p.foot_position for p in team2]
+    # Use RAW YOLO foot positions for drawing attacker/defender in SVG
+    # Scale image coords to SVG viewBox (scale by ratio of SVG size to image size)
+    svg_w = 1050  # SVG viewBox width (pitch_width * 10)
+    svg_h = 680   # SVG viewBox height (pitch_height * 10)
+    scale_x_svg = svg_w / w
+    scale_y_svg = svg_h / h
     
-    ball_pos = detection_result.ball.foot_position if detection_result.ball else None
+    # Raw YOLO positions for attacker/defender/goalkeeper markers
+    attacker_foot = offside_result.attacker.foot_position
+    defender_foot = offside_result.second_last_defender.foot_position
+    goalkeeper_foot = offside_result.goalkeeper.foot_position if offside_result.goalkeeper else (0, 0)
+    attacker_pos = (attacker_foot[0] * scale_x_svg, attacker_foot[1] * scale_y_svg)
+    defender_pos = (defender_foot[0] * scale_x_svg, defender_foot[1] * scale_y_svg)
+    goalkeeper_pos = (goalkeeper_foot[0] * scale_x_svg, goalkeeper_foot[1] * scale_y_svg)
+    
+    # Get team positions in SVG coordinates (raw YOLO positions)
+    # Exclude attacker, defender, and goalkeeper to avoid double drawing
+    excluded_positions = [attacker_foot, defender_foot, goalkeeper_foot]
+    team1_positions = []
+    team2_positions = []
+    for p in team1:
+        if p.foot_position not in excluded_positions:
+            team1_positions.append((p.foot_position[0] * scale_x_svg, p.foot_position[1] * scale_y_svg))
+    for p in team2:
+        if p.foot_position not in excluded_positions:
+            team2_positions.append((p.foot_position[0] * scale_x_svg, p.foot_position[1] * scale_y_svg))
+    
+    # Ball position in SVG coordinates (raw YOLO)
+    ball_pos_scaled = None
+    if ball_pos is not None:
+        ball_pos_scaled = (ball_pos[0] * scale_x_svg, ball_pos[1] * scale_y_svg)
+    
+    # Offside line: drawn at attacker's X position (player with ball)
+    offside_line_x_val = attacker_pos[0]
     
     svg_content = generate_offside_svg(
         attacker_pos=attacker_pos,
         defender_pos=defender_pos,
-        ball_pos=ball_pos,
-        offside_line_x=defender_pos[0] if offside_result.decision == "OFFSIDE" else None,
-        offside_line_top=offside_result.offside_line_image[0] if offside_result.offside_line_image else None,
-        offside_line_bottom=offside_result.offside_line_image[1] if offside_result.offside_line_image else None,
+        goalkeeper_pos=goalkeeper_pos,
+        ball_pos=ball_pos_scaled,
+        offside_line_x=offside_line_x_val,
+        offside_line_top=None,
+        offside_line_bottom=None,
         decision=offside_result.decision,
         team1_positions=team1_positions if team1_positions else None,
         team2_positions=team2_positions if team2_positions else None,
         image_width=w,
         image_height=h,
-        output_path=str(svg_path)
+        output_path=str(svg_path),
+        attacking_team=attacking_team or "team1",
+        goal_direction=goal_direction
     )
     logger.info(f"[Output] SVG saved: {svg_path}")
     svg_url = f"/pitch/{svg_filename}"
     
-    # Step 7: Prepare structured data for response and LLM explanation
+    # Step 7: Prepare structured data for response
+    def safe_float(val):
+        if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+            return 0.0
+        return val
+    
     structured_data = {
         "decision": offside_result.decision,
-        "attacker_position": {"x": offside_result.attacker.center[0], "y": offside_result.attacker.center[1]},
-        "defender_position": {"x": offside_result.second_last_defender.center[0], "y": offside_result.second_last_defender.center[1]},
-        "attacker_foot": {"x": offside_result.attacker.foot_position[0], "y": offside_result.attacker.foot_position[1]},
-        "defender_foot": {"x": offside_result.second_last_defender.foot_position[0], "y": offside_result.second_last_defender.foot_position[1]},
-        "confidence": offside_result.confidence,
+        "attacker_position": {"x": safe_float(offside_result.attacker.center[0]), "y": safe_float(offside_result.attacker.center[1])},
+        "defender_position": {"x": safe_float(offside_result.second_last_defender.center[0]), "y": safe_float(offside_result.second_last_defender.center[1])},
+        "attacker_foot": {"x": safe_float(offside_result.attacker.foot_position[0]), "y": safe_float(offside_result.attacker.foot_position[1])},
+        "defender_foot": {"x": safe_float(offside_result.second_last_defender.foot_position[0]), "y": safe_float(offside_result.second_last_defender.foot_position[1])},
+        "confidence": safe_float(offside_result.confidence),
         "calibration_quality": offside_result.calibration_quality,
-        "offside_margin_meters": offside_result.offside_margin_meters
+        "offside_margin_meters": safe_float(offside_result.offside_margin_meters)
     }
     
     return {
@@ -233,7 +265,8 @@ def process_frame_analysis(
 @router.post("/analyze-frame", response_model=OffsideResponse)
 async def analyze_frame(
     image_file: UploadFile = File(...),
-    goal_direction: str = "right"
+    goal_direction: str = Form("right"),
+    attacking_team: Optional[str] = Form(None),
 ):
     """
     Analyze a single frame for offside using geometric perspective correction.
@@ -244,7 +277,7 @@ async def analyze_frame(
     3. Camera calibration and homography for perspective correction
     4. Geometric calculations in real-world pitch coordinates
     
-    The LLM is used ONLY for generating human-readable explanations, NOT for detection.
+    Use attacking_team to manually specify which team is attacking.
     """
     # Validate input
     contents = await image_file.read()
@@ -257,16 +290,15 @@ async def analyze_frame(
     if image is None:
         raise HTTPException(status_code=400, detail="Invalid image file")
     
+    logger.info(f"[API] goal_direction={goal_direction}, attacking_team={attacking_team}")
+    
     # Process frame through geometric pipeline
-    result = process_frame_analysis(image, goal_direction)
+    result = process_frame_analysis(image, goal_direction, attacking_team=attacking_team)
     
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
     
     structured_data = result["structured_data"]
-    
-    # Generate LLM explanation ONLY for the result (not for detection)
-    explanation = generate_llm_explanation(structured_data)
     
     return OffsideResponse(
         decision=structured_data["decision"],
@@ -275,7 +307,7 @@ async def analyze_frame(
         defender_position=Position(**structured_data["defender_position"]),
         attacker_foot=Position(**structured_data["attacker_foot"]),
         defender_foot=Position(**structured_data["defender_foot"]),
-        explanation=explanation,
+        explanation=f"{structured_data['decision']} - Margin: {structured_data['offside_margin_meters']:.2f}m",
         annotated_image_url=result["annotated_url"],
         svg_url=result["svg_url"],
         calibration_quality=structured_data["calibration_quality"],
@@ -294,17 +326,7 @@ async def generate_visual(request: VisualizationRequest):
         decision=request.decision
     )
     
-    explanation = None
-    if request.generate_explanation:
-        structured_data = {
-            "decision": request.decision,
-            "attacker_position": {"x": request.attacker_position.x, "y": request.attacker_position.y},
-            "defender_position": {"x": request.defender_position.x, "y": request.defender_position.y},
-            "confidence": 0.85
-        }
-        explanation = generate_llm_explanation(structured_data)
-    
-    return VisualizationResponse(svg_content=svg_content, explanation=explanation)
+    return VisualizationResponse(svg_content=svg_content, explanation=None)
 
 
 @router.post("/analyze-with-calibration", response_model=OffsideResponse)
@@ -368,7 +390,6 @@ async def analyze_with_calibration(
         raise HTTPException(status_code=422, detail=result["error"])
     
     structured_data = result["structured_data"]
-    explanation = generate_llm_explanation(structured_data)
     
     return OffsideResponse(
         decision=structured_data["decision"],
@@ -377,7 +398,7 @@ async def analyze_with_calibration(
         defender_position=Position(**structured_data["defender_position"]),
         attacker_foot=Position(**structured_data["attacker_foot"]),
         defender_foot=Position(**structured_data["defender_foot"]),
-        explanation=explanation,
+        explanation=f"{structured_data['decision']} - Margin: {structured_data['offside_margin_meters']:.2f}m",
         annotated_image_url=result["annotated_url"],
         svg_url=result["svg_url"],
         calibration_quality=structured_data["calibration_quality"],

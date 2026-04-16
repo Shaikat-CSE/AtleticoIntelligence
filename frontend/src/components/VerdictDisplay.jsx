@@ -43,7 +43,7 @@ export default function VerdictDisplay({ result, onClose }) {
             <h4 className="text-sm font-semibold text-gray-400 mb-2">Top-Down View</h4>
             <div className="bg-green-800 rounded-lg p-4">
               <img
-                src={result.svg_url}
+                src={`${result.svg_url}?t=${Date.now()}`}
                 alt="Pitch diagram"
                 className="w-full max-h-64 mx-auto"
               />

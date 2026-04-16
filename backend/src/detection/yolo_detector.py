@@ -33,11 +33,12 @@ class YOLODetector:
     PERSON_CLASS = 0
     BALL_CLASS = 32
 
-    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.3):
+    def __init__(self, model_path: str = "yolov8n.pt", confidence_threshold: float = 0.3, ball_confidence_threshold: float = 0.05):
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
+        self.ball_confidence_threshold = ball_confidence_threshold
         self.model = None
-        print(f"[YOLODetector] Initialized with confidence_threshold={confidence_threshold}")
+        print(f"[YOLODetector] Initialized with confidence_threshold={confidence_threshold}, ball_confidence_threshold={ball_confidence_threshold}")
 
     def load_model(self):
         from ultralytics import YOLO
@@ -67,7 +68,7 @@ class YOLODetector:
 
                 print(f"[YOLODetector] Detected: class={cls_id}, conf={conf:.2f}, box=[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}]")
 
-                if cls_id == self.PERSON_CLASS:
+                if cls_id == self.PERSON_CLASS and conf >= self.confidence_threshold:
                     players.append(BoundingBox(
                         x1=float(x1), y1=float(y1),
                         x2=float(x2), y2=float(y2),
@@ -75,7 +76,7 @@ class YOLODetector:
                         class_id=cls_id,
                         class_name="player"
                     ))
-                elif cls_id == self.BALL_CLASS:
+                elif cls_id == self.BALL_CLASS and conf >= self.ball_confidence_threshold:
                     ball = BoundingBox(
                         x1=float(x1), y1=float(y1),
                         x2=float(x2), y2=float(y2),
@@ -126,7 +127,7 @@ class YOLODetector:
         return intersection / union if union > 0 else 0
 
 
-def create_detector(model_path: str = "yolov8n.pt", confidence_threshold: float = 0.5) -> YOLODetector:
-    detector = YOLODetector(model_path, confidence_threshold)
+def create_detector(model_path: str = "yolov8n.pt", confidence_threshold: float = 0.5, ball_confidence_threshold: float = 0.05) -> YOLODetector:
+    detector = YOLODetector(model_path, confidence_threshold, ball_confidence_threshold)
     detector.load_model()
     return detector

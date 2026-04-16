@@ -11,6 +11,8 @@ export default function VideoPlayer({ onAnalysisComplete }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [uploadedImage, setUploadedImage] = useState(null)
+  const [attackingTeam, setAttackingTeam] = useState('team1')
+  const [goalDirection, setGoalDirection] = useState('right')
 
   const handleVideoUpload = (e) => {
     const file = e.target.files[0]
@@ -79,7 +81,7 @@ export default function VideoPlayer({ onAnalysisComplete }) {
   const performAnalysis = async (file) => {
     setIsAnalyzing(true)
     try {
-      const result = await analyzeFrame(file, 'right')
+      const result = await analyzeFrame(file, goalDirection, attackingTeam)
       if (onAnalysisComplete) onAnalysisComplete(result)
     } catch (error) {
       console.error('Analysis failed:', error)
@@ -159,6 +161,63 @@ export default function VideoPlayer({ onAnalysisComplete }) {
             alt="Uploaded frame"
             className="w-full rounded-lg border border-gray-700 mb-4"
           />
+          
+          <div className="mb-4 p-3 bg-gray-800 rounded-lg">
+            <label className="block text-sm text-gray-400 mb-2">Select Attacking Team</label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="attackingTeam"
+                  value="team1"
+                  checked={attackingTeam === 'team1'}
+                  onChange={(e) => setAttackingTeam(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-red-400">Team 1 (Red)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="attackingTeam"
+                  value="team2"
+                  checked={attackingTeam === 'team2'}
+                  onChange={(e) => setAttackingTeam(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-blue-400">Team 2 (Blue)</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="mb-4 p-3 bg-gray-800 rounded-lg">
+            <label className="block text-sm text-gray-400 mb-2">Attack Direction (Goal Being Attacked)</label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="goalDirection"
+                  value="left"
+                  checked={goalDirection === 'left'}
+                  onChange={(e) => setGoalDirection(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-yellow-400">← LEFT goal (attacking right, toward x=105)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="goalDirection"
+                  value="right"
+                  checked={goalDirection === 'right'}
+                  onChange={(e) => setGoalDirection(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-green-400">RIGHT goal → (attacking left, toward x=0)</span>
+              </label>
+            </div>
+          </div>
+          
           <input
             type="file"
             accept="image/*"
@@ -209,6 +268,62 @@ export default function VideoPlayer({ onAnalysisComplete }) {
             />
           </div>
 
+          <div className="mb-4 p-3 bg-gray-800 rounded-lg">
+            <label className="block text-sm text-gray-400 mb-2">Select Attacking Team</label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="attackingTeamVideo"
+                  value="team1"
+                  checked={attackingTeam === 'team1'}
+                  onChange={(e) => setAttackingTeam(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-red-400">Team 1 (Red)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="attackingTeamVideo"
+                  value="team2"
+                  checked={attackingTeam === 'team2'}
+                  onChange={(e) => setAttackingTeam(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-blue-400">Team 2 (Blue)</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="mb-4 p-3 bg-gray-800 rounded-lg">
+            <label className="block text-sm text-gray-400 mb-2">Attack Direction (Goal Being Attacked)</label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="goalDirectionVideo"
+                  value="left"
+                  checked={goalDirection === 'left'}
+                  onChange={(e) => setGoalDirection(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-yellow-400">← LEFT goal (attacking right, toward x=105)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="goalDirectionVideo"
+                  value="right"
+                  checked={goalDirection === 'right'}
+                  onChange={(e) => setGoalDirection(e.target.value)}
+                  className="text-accent-neon"
+                />
+                <span className="text-green-400">RIGHT goal → (attacking left, toward x=0)</span>
+              </label>
+            </div>
+          </div>
+          
           <button
             onClick={handleAnalyzeFrame}
             disabled={isAnalyzing}

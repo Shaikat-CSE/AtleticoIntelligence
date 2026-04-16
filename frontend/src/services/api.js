@@ -7,10 +7,13 @@ const api = axios.create({
   timeout: 60000,
 })
 
-export const analyzeFrame = async (imageFile, goalDirection = 'right') => {
+export const analyzeFrame = async (imageFile, goalDirection = 'right', attackingTeam = null) => {
   const formData = new FormData()
   formData.append('image_file', imageFile)
   formData.append('goal_direction', goalDirection)
+  if (attackingTeam) {
+    formData.append('attacking_team', attackingTeam)
+  }
 
   const response = await api.post('/analyze-frame', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },

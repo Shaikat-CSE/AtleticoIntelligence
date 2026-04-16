@@ -17,27 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class PlayerPosition:
-    """Player position with both image and pitch coordinates."""
-    player_id: int
-    bounding_box: BoundingBox
-    image_position: Tuple[float, float]  # (x, y) in pixels
-    pitch_position: Optional[Tuple[float, float]]  # (x, y) in meters
-    team: str  # "attacking" or "defending"
-
-
-@dataclass
 class OffsideAnalysisResult:
     """Result of offside analysis with geometric accuracy."""
     decision: str  # "OFFSIDE", "ONSIDE", or "UNKNOWN"
     attacker: BoundingBox
-    second_last_defender: BoundingBox
+    second_last_defender: BoundingBox  # Extreme defender in attacking direction
     confidence: float
     attacker_pitch_pos: Optional[Tuple[float, float]]
     defender_pitch_pos: Optional[Tuple[float, float]]
     offside_margin_meters: float  # How far offside/onside in meters
     offside_line_image: Optional[Tuple[Tuple[float, float], Tuple[float, float]]]
     calibration_quality: str  # "good", "poor", "fallback"
+    goalkeeper: Optional[BoundingBox] = None  # Defender closest to own goal line
 
 
 class GeometricOffsideAnalyzer:
@@ -59,7 +50,9 @@ class GeometricOffsideAnalyzer:
         self, 
         team1: List[BoundingBox], 
         team2: List[BoundingBox],
-        image: Optional[np.ndarray] = None
+        image: Optional[np.ndarray] = None,
+        ball_position: Optional[Tuple[float, float]] = None,
+        attacking_team_input: Optional[str] = None  # "team1" or "team2"
     ) -> OffsideAnalysisResult:
         """
         Analyze offside with perspective-corrected geometry.
@@ -68,6 +61,9 @@ class GeometricOffsideAnalyzer:
             team1: List of players in team 1
             team2: List of players in team 2
             image: Optional image for camera calibration
+            ball_position: Optional ball position (x, y) in pixels
+            attacking_team: Optional manual assignment - "team1" or "team2"
+                          If provided, this team is considered attacking
             
         Returns:
             OffsideAnalysisResult with geometrically accurate decision
@@ -81,11 +77,13 @@ class GeometricOffsideAnalyzer:
             self.calibrator = CameraCalibrator()
             calibration = self.calibrator.auto_calibrate(image)
         elif self.calibrator is not None:
-            # Use provided calibrator
+            vp = None
+            if hasattr(self.calibrator, '_vanishing_point') and self.calibrator._vanishing_point is not None:
+                vp = self.calibrator._vanishing_point
             calibration = CalibrationResult(
                 homography_matrix=self.calibrator._homography if self.calibrator._homography is not None else np.eye(3),
                 inverse_homography=self.calibrator._inverse_homography if self.calibrator._inverse_homography is not None else np.eye(3),
-                vanishing_point=None,
+                vanishing_point=vp,
                 pitch_corners_image=np.array([]),
                 reprojection_error=0.0,
                 is_valid=self.calibrator._homography is not None
@@ -93,115 +91,107 @@ class GeometricOffsideAnalyzer:
         else:
             calibration = None
         
-        # Determine attacking and defending teams
-        attacking_team, defending_team = self._determine_teams(team1, team2)
+        all_players = team1 + team2
         
-        # Get attacking player (furthest toward goal)
-        attacker = self._find_attacking_player(attacking_team)
-        if attacker is None:
-            logger.warning("No attacker found")
+        # STRICT RULES:
+        # 1. Player CLOSEST to ball = ATTACKER (regardless of team)
+        # 2. Other team jersey color = DEFENDERS
+        # 3. 2nd defender (in UI) = FIRST defender in ATTACKING direction (closest to goal being attacked)
+        #    - If goal_direction='right' (attacking leftward): leftmost defender
+        #    - If goal_direction='left' (attacking rightward): rightmost defender
+        
+        if ball_position is None:
+            logger.warning("No ball position - cannot determine attacker")
             return self._create_unknown_result(None, None)
         
-        # Get defending players sorted by distance to goal
-        defenders_sorted = self._sort_defenders_by_goal_distance(defending_team)
-        if len(defenders_sorted) < 2:
-            logger.warning("Not enough defenders (need at least 2)")
+        # Rule 1: Find attacker (closest to ball)
+        attacker = min(all_players, key=lambda p: np.linalg.norm(np.array(p.foot_position) - np.array(ball_position)))
+        logger.info(f"Attacker (closest to ball): foot=({attacker.foot_position[0]:.1f}, {attacker.foot_position[1]:.1f})")
+        
+        # Determine attacker's team
+        if attacker in team1:
+            attacking_list = team1
+            defending_list = team2
+            attacker_team = "team1"
+        elif attacker in team2:
+            attacking_list = team2
+            defending_list = team1
+            attacker_team = "team2"
+        else:
+            logger.warning("Attacker not found in either team!")
             return self._create_unknown_result(attacker, None)
         
-        # Second-last defender
-        second_last_defender = defenders_sorted[-2]
+        logger.info(f"Attacking team: {attacker_team}, Defending team: {attacker_team == 'team1' and 'team2' or 'team1'}")
         
-        # Transform positions to pitch coordinates
-        attacker_pitch_pos = self._get_foot_position_pitch(attacker, calibration)
-        defender_pitch_pos = self._get_foot_position_pitch(second_last_defender, calibration)
+        if len(defending_list) < 1:
+            logger.warning("No defenders found!")
+            return self._create_unknown_result(attacker, None)
         
-        # Calculate offside using geometric comparison
-        if attacker_pitch_pos is not None and defender_pitch_pos is not None:
-            is_offside, margin = self._compare_positions_geometric(
-                attacker_pitch_pos, 
-                defender_pitch_pos
-            )
-            calibration_quality = "good" if calibration and calibration.is_valid else "fallback"
+        # Rule 3: DEFENDER = FIRST defender in attacking direction (closest to goal being attacked)
+        # GOALKEEPER = defender closest to their OWN goal line (opposite extreme)
+        if self.goal_direction == "right":
+            # Attacking LEFT - leftmost defender is closest to attacking goal
+            second_last_defender = min(defending_list, key=lambda p: p.foot_position[0])
+            goalkeeper = max(defending_list, key=lambda p: p.foot_position[0])  # Rightmost = own goal
         else:
-            # Fallback to simple image-space comparison (less accurate)
-            is_offside, margin = self._compare_positions_image_space(
-                attacker.foot_position,
-                second_last_defender.foot_position
-            )
-            calibration_quality = "poor"
+            # Attacking RIGHT - rightmost defender is closest to attacking goal
+            second_last_defender = max(defending_list, key=lambda p: p.foot_position[0])
+            goalkeeper = min(defending_list, key=lambda p: p.foot_position[0])  # Leftmost = own goal
         
-        decision = "OFFSIDE" if is_offside else "ONSIDE"
-        confidence = self._calculate_confidence(attacker, second_last_defender, calibration)
+        # Log all defenders for debugging
+        for i, d in enumerate(defending_list):
+            logger.info(f"  Defender {i}: foot=({d.foot_position[0]:.1f}, {d.foot_position[1]:.1f})")
+        
+        # OFFSIDE CHECK: Attacker is offside if they are ahead of ALL defenders
+        # goal_direction='right' (attacking LEFT): attacker must be LEFT of ALL defenders
+        # goal_direction='left' (attacking RIGHT): attacker must be RIGHT of ALL defenders
+        attacker_x = attacker.foot_position[0]
+        
+        if self.goal_direction == "right":
+            # Attacking LEFT - attacker ahead if x < ALL defenders' x
+            is_ahead_of_all = all(attacker_x < d.foot_position[0] for d in defending_list)
+            defender_x = min(d.foot_position[0] for d in defending_list)  # Leftmost defender
+        else:
+            # Attacking RIGHT - attacker ahead if x > ALL defenders' x
+            is_ahead_of_all = all(attacker_x > d.foot_position[0] for d in defending_list)
+            defender_x = max(d.foot_position[0] for d in defending_list)  # Rightmost defender
+        
+        is_offside = is_ahead_of_all
+        margin = abs(attacker_x - defender_x)
+        
+        logger.info(f"Offside check: attacker_x={attacker_x:.1f}, defender_x={defender_x:.1f}, is_offside={is_offside}, margin={margin:.1f}")
         
         # Get offside line for visualization
         offside_line = None
-        if calibration and calibration.is_valid and defender_pitch_pos is not None:
-            corrector = PerspectiveCorrector(calibration)
-            h = image.shape[0] if image is not None else 720
-            offside_line = corrector.get_offside_line_points(defender_pitch_pos[0], h)
+        calibration_quality = "good" if calibration and calibration.is_valid else "fallback"
         
-        logger.info(
-            f"Offside decision: {decision}, "
-            f"margin: {margin:.2f}m, "
-            f"calibration: {calibration_quality}"
-        )
+        # Try to get perspective-corrected offside line
+        if calibration and calibration.is_valid:
+            try:
+                corrector = PerspectiveCorrector(calibration)
+                h, w = image.shape[:2] if image is not None else (720, 1920)
+                offside_line = corrector.get_perspective_offside_line(defender_x, (h, w))
+                logger.info(f"Offside line computed: {offside_line}")
+            except Exception as e:
+                logger.warning(f"Failed to compute offside line: {e}")
+        
+        decision = "OFFSIDE" if is_offside else "ONSIDE"
+        confidence = (attacker.confidence + min(d.confidence for d in defending_list)) / 2
+        
+        logger.info(f"Offside decision: {decision}, margin: {margin:.2f}px")
         
         return OffsideAnalysisResult(
             decision=decision,
             attacker=attacker,
             second_last_defender=second_last_defender,
+            goalkeeper=goalkeeper,
             confidence=confidence,
-            attacker_pitch_pos=attacker_pitch_pos,
-            defender_pitch_pos=defender_pitch_pos,
+            attacker_pitch_pos=None,
+            defender_pitch_pos=None,
             offside_margin_meters=margin,
             offside_line_image=offside_line,
             calibration_quality=calibration_quality
         )
-    
-    def _determine_teams(
-        self, 
-        team1: List[BoundingBox], 
-        team2: List[BoundingBox]
-    ) -> Tuple[List[BoundingBox], List[BoundingBox]]:
-        """Determine which team is attacking based on average position."""
-        if not team1 or not team2:
-            return team1, team2
-        
-        # Calculate average x position of each team
-        team1_avg_x = np.mean([p.foot_position[0] for p in team1])
-        team2_avg_x = np.mean([p.foot_position[0] for p in team2])
-        
-        if self.goal_direction == "right":
-            # Attacking team is closer to right side (higher x)
-            return (team1, team2) if team1_avg_x > team2_avg_x else (team2, team1)
-        else:
-            # Attacking team is closer to left side (lower x)
-            return (team1, team2) if team1_avg_x < team2_avg_x else (team2, team1)
-    
-    def _find_attacking_player(
-        self, 
-        attacking_team: List[BoundingBox]
-    ) -> Optional[BoundingBox]:
-        """Find the player furthest toward the opponent's goal."""
-        if not attacking_team:
-            return None
-        
-        if self.goal_direction == "right":
-            return max(attacking_team, key=lambda p: p.foot_position[0])
-        else:
-            return min(attacking_team, key=lambda p: p.foot_position[0])
-    
-    def _sort_defenders_by_goal_distance(
-        self, 
-        defending_team: List[BoundingBox]
-    ) -> List[BoundingBox]:
-        """Sort defenders by their distance from the goal they're defending."""
-        if self.goal_direction == "right":
-            # Goal on right, defenders closer to right have lower x
-            return sorted(defending_team, key=lambda p: p.foot_position[0], reverse=True)
-        else:
-            # Goal on left, defenders closer to left have higher x
-            return sorted(defending_team, key=lambda p: p.foot_position[0])
     
     def _get_foot_position_pitch(
         self, 
@@ -248,36 +238,54 @@ class GeometricOffsideAnalyzer:
         attacker_x = attacker_pitch_pos[0]
         defender_x = defender_pitch_pos[0]
         
+        if np.isnan(attacker_x) or np.isnan(defender_x):
+            logger.warning("NaN detected in pitch positions, using fallback comparison")
+            return False, 0.0
+        
+        logger.info(f"Geometric comparison: attacker_x={attacker_x:.2f}m, defender_x={defender_x:.2f}m, "
+                    f"goal_direction={self.goal_direction}, tolerance={self.tolerance_meters}m")
+        
         if self.goal_direction == "right":
             margin = attacker_x - defender_x
-            is_offside = margin > self.tolerance_meters
         else:
             margin = defender_x - attacker_x
-            is_offside = margin > self.tolerance_meters
         
-        return is_offside, margin
+        is_offside = margin > self.tolerance_meters
+        
+        logger.info(f"Offside margin: {margin:.2f}m, is_offside={is_offside}")
+        
+        return is_offside, abs(margin)
     
     def _compare_positions_image_space(
         self,
         attacker_image_pos: Tuple[float, float],
-        defender_image_pos: Tuple[float, float]
+        defender_image_pos: Tuple[float, float],
+        image_width: int = 1920
     ) -> Tuple[bool, float]:
         """
         Fallback comparison in image space (pixels).
         Less accurate but works without calibration.
+        
+        Converts pixel difference to approximate meters assuming
+        the pitch spans most of the image width.
         """
         attacker_x = attacker_image_pos[0]
         defender_x = defender_image_pos[0]
         
+        pitch_width_meters = 105.0
+        pixels_per_meter = image_width / pitch_width_meters
+        tolerance_pixels = self.tolerance_meters * pixels_per_meter
+        
         if self.goal_direction == "right":
             margin_pixels = attacker_x - defender_x
-            is_offside = margin_pixels > 10  # ~10 pixels tolerance
         else:
             margin_pixels = defender_x - attacker_x
-            is_offside = margin_pixels > 10
         
-        # Rough conversion to meters for reporting (assume ~100m = image width)
-        margin_meters = margin_pixels / 10.0  # Very rough estimate
+        is_offside = margin_pixels > tolerance_pixels
+        margin_meters = abs(margin_pixels) / pixels_per_meter
+        
+        logger.info(f"Image-space fallback: margin_pixels={margin_pixels:.1f}, "
+                    f"tolerance_pixels={tolerance_pixels:.1f}, margin_meters={margin_meters:.2f}m")
         
         return is_offside, margin_meters
     
@@ -330,16 +338,19 @@ def analyze_offside(
     team2: List[BoundingBox], 
     goal_direction: str = "right",
     image: Optional[np.ndarray] = None,
-    calibrator: Optional[CameraCalibrator] = None
+    calibrator: Optional[CameraCalibrator] = None,
+    ball_position: Optional[Tuple[float, float]] = None,
+    attacking_team: Optional[str] = None
 ) -> OffsideAnalysisResult:
     """
     Analyze offside with geometric corrections.
     
-    This is the main entry point - replaces the old analyze_offside function.
+    Args:
+        attacking_team: "team1" or "team2" to manually specify attacking team
     """
     analyzer = GeometricOffsideAnalyzer(
         tolerance_meters=0.5,
         goal_direction=goal_direction,
         calibrator=calibrator
     )
-    return analyzer.analyze(team1, team2, image)
+    return analyzer.analyze(team1, team2, image, ball_position, attacking_team_input=attacking_team)

@@ -38,11 +38,3 @@ visualization:
   offside_line_color: [0, 255, 255] # Cyan (BGR)
   show_calibration_quality: true
   show_margin_meters: true
-
-llm:
-  enabled: true
-  provider: "gemini"
-  model: "gemini-pro"
-  api_key_env: "GEMINI_API_KEY"
-  use_for_explanations: true   # Generate human-readable explanations
-  use_for_detection: false     # NEVER use LLM for detection (deprecated)

@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+import numpy as np
 
 
 class SVGPitchGenerator:
@@ -12,6 +13,7 @@ class SVGPitchGenerator:
         self,
         attacker_pos: Tuple[float, float],
         defender_pos: Tuple[float, float],
+        goalkeeper_pos: Optional[Tuple[float, float]] = None,
         ball_pos: Optional[Tuple[float, float]] = None,
         offside_line_x: Optional[float] = None,
         offside_line_top: Optional[Tuple[float, float]] = None,
@@ -21,7 +23,9 @@ class SVGPitchGenerator:
         team2_positions: List[Tuple[float, float]] = None,
         image_width: int = 1280,
         image_height: int = 720,
-        normalize: bool = True
+        positions_are_pitch_coords: bool = False,
+        attacking_team: str = "team1",
+        goal_direction: str = "right"
     ) -> str:
         w = self.pitch_width * self.scale
         h = self.pitch_height * self.scale
@@ -29,16 +33,17 @@ class SVGPitchGenerator:
         svg = [
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">',
             '<style>',
-            '.pitch {{ fill: #2e7d32; }}',
-            '.line {{ stroke: white; stroke-width: 2; fill: none; }}',
-            '.attacker {{ fill: #ff3b3b; stroke: white; stroke-width: 2; }}',
-            '.defender {{ fill: #3b8bff; stroke: white; stroke-width: 2; }}',
-            '.ball {{ fill: white; stroke: black; stroke-width: 1; }}',
-            '.offside-line {{ stroke: #ffd700; stroke-width: 3; stroke-dasharray: 10,5; }}',
-            '.label {{ font-family: Arial, sans-serif; font-size: 14px; fill: white; text-anchor: middle; }}',
-            '.decision {{ font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; }}',
-            '.decision-offside {{ fill: #ff3b3b; }}',
-            '.decision-onside {{ fill: #39ff14; }}',
+            '.pitch { fill: #2e7d32; }',
+            '.line { stroke: white; stroke-width: 2; fill: none; }',
+            '.attacker { fill: #ff3b3b; stroke: white; stroke-width: 2; }',
+            '.defender { fill: #3b8bff; stroke: white; stroke-width: 2; }',
+            '.goalkeeper { fill: #ffaa00; stroke: white; stroke-width: 2; }',
+            '.ball { fill: white; stroke: black; stroke-width: 1; }',
+            '.offside-line { stroke: #ffd700; stroke-width: 3; stroke-dasharray: 10,5; }',
+            '.label { font-family: Arial, sans-serif; font-size: 14px; fill: white; text-anchor: middle; }',
+            '.decision { font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; }',
+            '.decision-offside { fill: #ff3b3b; }',
+            '.decision-onside { fill: #39ff14; }',
             '</style>',
             '<rect width="100%" height="100%" class="pitch"/>',
             '<rect x="10" y="10" width="1030" height="660" class="line"/>',
@@ -49,55 +54,85 @@ class SVGPitchGenerator:
             '<circle cx="520" cy="340" r="5" fill="white"/>',
         ]
 
-        def normalize_position(x, y):
-            if normalize and image_width > 0 and image_height > 0:
-                norm_x = (x / image_width) * self.pitch_width
-                norm_y = (y / image_height) * self.pitch_height
-                return norm_x, norm_y
+        # Add attack direction indicator at BOTTOM of pitch based on goal_direction
+        # Show arrow pointing in the attack direction
+        if goal_direction == "right":
+            svg.append('<path d="M 50 620 L 950 620 M 920 590 L 950 620 L 920 650" stroke="#00ff00" stroke-width="5" fill="none" stroke-linecap="round"/>')
+            svg.append('<text x="500" y="580" class="label" style="fill: #00ff00; font-size: 16px; font-weight: bold;">ATTACK DIRECTION ==&gt;</text>')
+            svg.append('<text x="500" y="665" class="label" style="fill: #ffff00; font-size: 12px;">Goal being attacked: LEFT (x=0)</text>')
+        else:
+            svg.append('<path d="M 950 620 L 50 620 M 80 590 L 50 620 L 80 650" stroke="#00ff00" stroke-width="5" fill="none" stroke-linecap="round"/>')
+            svg.append('<text x="500" y="580" class="label" style="fill: #00ff00; font-size: 16px; font-weight: bold;">&lt;== ATTACK DIRECTION</text>')
+            svg.append('<text x="500" y="665" class="label" style="fill: #ffff00; font-size: 12px;">Goal being attacked: RIGHT (x=105)</text>')
+
+        def to_svg_coords(x, y):
+            """Convert position - already in SVG coordinates, just return as-is."""
             return x, y
 
-        def scale_pos(x, y):
-            return x * self.scale, y * self.scale
+        def draw_player(cx, cy, team_class, is_attacker=False, has_ball=False):
+            """Draw player circle with optional ball indicator."""
+            radius = 15 if is_attacker else 12
+            opacity = 1.0 if is_attacker else 0.7
+            extra_stroke = 'stroke-width: 4;' if is_attacker else 'stroke-width: 2;'
+            extra = ''
+            if has_ball:
+                extra = f'<circle cx="{cx}" cy="{cy}" r="{radius + 8}" fill="none" stroke="#ffd700" stroke-width="3" stroke-dasharray="5,3"/>'
+                extra += f'<text x="{cx}" y="{cy - radius - 12}" class="label" style="font-size: 12px; fill: #ffd700;">⚽ BALL</text>'
+            return f'{extra}<circle cx="{cx}" cy="{cy}" r="{radius}" class="{team_class}" style="{extra_stroke}" opacity="{opacity}"/>'
+
+        if attacking_team == "team1":
+            attacking_class = "attacker"
+            defending_class = "defender"
+        else:
+            attacking_class = "defender"
+            defending_class = "attacker"
 
         if team1_positions:
             for i, (px, py) in enumerate(team1_positions):
-                nx, ny = normalize_position(px, py)
-                sx, sy = scale_pos(nx, ny)
-                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="attacker" opacity="0.7"/>')
+                sx, sy = to_svg_coords(px, py)
+                team_class = attacking_class if attacking_team == "team1" else defending_class
+                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team_class}" opacity="0.7"/>')
 
         if team2_positions:
             for i, (px, py) in enumerate(team2_positions):
-                nx, ny = normalize_position(px, py)
-                sx, sy = scale_pos(nx, ny)
-                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="defender" opacity="0.7"/>')
+                sx, sy = to_svg_coords(px, py)
+                team_class = attacking_class if attacking_team == "team2" else defending_class
+                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team_class}" opacity="0.7"/>')
 
-        ax, ay = normalize_position(attacker_pos[0], attacker_pos[1])
-        sx, sy = scale_pos(ax, ay)
-        svg.append(f'<circle cx="{sx}" cy="{sy}" r="15" class="attacker"/>')
-        svg.append(f'<text x="{sx}" y="{sy - 20}" class="label">ATTACKER</text>')
+        # Colors based on attacking team
+        if attacking_team == "team1":
+            defender_color = "#3b8bff"  # Blue for team2 (defending)
+        else:
+            defender_color = "#ff3b3b"  # Red for team1 (defending)
+        
+        # Only draw attacker if valid position (not 0,0)
+        if attacker_pos[0] > 0 and attacker_pos[1] > 0:
+            ax, ay = to_svg_coords(attacker_pos[0], attacker_pos[1])
+            has_ball = ball_pos is not None and np.linalg.norm(np.array(attacker_pos) - np.array(ball_pos)) < 3
+            svg.append(draw_player(ax, ay, "attacker", is_attacker=True, has_ball=has_ball))
+            svg.append(f'<text x="{ax}" y="{ay - 30}" class="label" style="font-weight: bold; fill: #ff3b3b;">ATTACKER</text>')
 
-        dx, dy = normalize_position(defender_pos[0], defender_pos[1])
-        sx, sy = scale_pos(dx, dy)
-        svg.append(f'<circle cx="{sx}" cy="{sy}" r="15" class="defender"/>')
-        svg.append(f'<text x="{sx}" y="{sy - 20}" class="label">2ND LAST DEF</text>')
+        # Only draw defender if valid position (not 0,0)
+        if defender_pos[0] > 0 and defender_pos[1] > 0:
+            dx, dy = to_svg_coords(defender_pos[0], defender_pos[1])
+            svg.append(f'<circle cx="{dx}" cy="{dy}" r="18" fill="{defender_color}" stroke="white" stroke-width="3"/>')
+            svg.append(f'<text x="{dx}" y="{dy + 40}" class="label" style="font-weight: bold;">DEFENDER</text>')
+
+        # Draw goalkeeper (orange circle)
+        if goalkeeper_pos and goalkeeper_pos[0] > 0 and goalkeeper_pos[1] > 0:
+            gx, gy = to_svg_coords(goalkeeper_pos[0], goalkeeper_pos[1])
+            svg.append(f'<circle cx="{gx}" cy="{gy}" r="18" fill="#ffaa00" stroke="white" stroke-width="3"/>')
+            svg.append(f'<text x="{gx}" y="{gy + 40}" class="label" style="font-weight: bold; fill: #ffaa00;">GOALKEEPER</text>')
 
         if ball_pos:
-            bx, by = normalize_position(ball_pos[0], ball_pos[1])
-            sx, sy = scale_pos(bx, by)
-            svg.append(f'<circle cx="{sx}" cy="{sy}" r="6" class="ball"/>')
+            bx, by = to_svg_coords(ball_pos[0], ball_pos[1])
+            svg.append(f'<circle cx="{bx}" cy="{by}" r="6" class="ball"/>')
 
-        if offside_line_top and offside_line_bottom:
-            top_x, top_y = offside_line_top
-            bottom_x, bottom_y = offside_line_bottom
-            nx_top, ny_top = normalize_position(top_x, top_y)
-            nx_bottom, ny_bottom = normalize_position(bottom_x, bottom_y)
-            sx_top, sy_top = scale_pos(nx_top, ny_top)
-            sx_bottom, sy_bottom = scale_pos(nx_bottom, ny_bottom)
-            svg.append(f'<line x1="{sx_top}" y1="{sy_top}" x2="{sx_bottom}" y2="{sy_bottom}" class="offside-line"/>')
-        elif offside_line_x is not None:
-            nx, _ = normalize_position(offside_line_x, 0)
-            lx, _ = scale_pos(nx, 0)
-            svg.append(f'<line x1="{lx}" y1="10" x2="{lx}" y2="670" class="offside-line"/>')
+        # Draw offside line at attacker's position (golden dashed vertical line)
+        # This shows where the attacker (with ball) is positioned
+        if attacker_pos[0] > 0 and attacker_pos[1] > 0:
+            ax, _ = to_svg_coords(attacker_pos[0], 0)
+            svg.append(f'<line x1="{ax}" y1="10" x2="{ax}" y2="670" class="offside-line"/>')
 
         decision_class = "decision-offside" if decision == "OFFSIDE" else "decision-onside"
         svg.append(f'<text x="{w//2}" y="30" class="decision {decision_class}" text-anchor="middle">{decision}</text>')
@@ -107,13 +142,14 @@ class SVGPitchGenerator:
 
     def save_svg(self, svg_content: str, output_path: str):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(svg_content)
 
 
 def generate_offside_svg(
     attacker_pos: Tuple[float, float],
     defender_pos: Tuple[float, float],
+    goalkeeper_pos: Optional[Tuple[float, float]] = None,
     ball_pos: Optional[Tuple[float, float]] = None,
     offside_line_x: Optional[float] = None,
     offside_line_top: Optional[Tuple[float, float]] = None,
@@ -123,12 +159,15 @@ def generate_offside_svg(
     team2_positions: List[Tuple[float, float]] = None,
     image_width: int = 1280,
     image_height: int = 720,
-    output_path: str = "output/pitch.svg"
+    output_path: str = "output/pitch.svg",
+    attacking_team: str = "team1",
+    goal_direction: str = "right"
 ) -> str:
     generator = SVGPitchGenerator()
     svg_content = generator.generate_topdown_pitch_svg(
-        attacker_pos, defender_pos, ball_pos, offside_line_x, offside_line_top, offside_line_bottom,
-        decision, team1_positions, team2_positions, image_width, image_height
+        attacker_pos, defender_pos, goalkeeper_pos, ball_pos, offside_line_x, offside_line_top, offside_line_bottom,
+        decision, team1_positions, team2_positions, image_width, image_height,
+        attacking_team=attacking_team, goal_direction=goal_direction
     )
     generator.save_svg(svg_content, output_path)
     return svg_content
