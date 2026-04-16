@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-pitch-darker text-white;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-accent-neon text-black font-bold py-4 px-8 rounded-lg text-xl transition-all hover:brightness-110 active:scale-95;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg transition-all active:scale-95;
+  }
+
+  .btn-danger {
+    @apply bg-verdict-offside text-white font-bold py-4 px-8 rounded-lg text-xl transition-all hover:brightness-110 active:scale-95;
+  }
+
+  .btn-success {
+    @apply bg-verdict-onside text-black font-bold py-4 px-8 rounded-lg text-xl transition-all hover:brightness-110 active:scale-95;
+  }
+
+  .verdict-badge {
+    @apply px-6 py-3 rounded-full font-bold text-xl;
+  }
+
+  .verdict-offside {
+    @apply bg-verdict-offside text-white;
+  }
+
+  .verdict-onside {
+    @apply bg-verdict-onside text-black;
+  }
+
+  .card {
+    @apply bg-pitch-dark rounded-xl p-6 border border-gray-800;
+  }
+}

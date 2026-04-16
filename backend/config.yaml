@@ -1,0 +1,48 @@
+detection:
+  model_path: "yolov8n.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.4
+  classes:
+    person: 0
+    ball: 32
+
+pitch:
+  width: 105.0  # meters
+  height: 68.0  # meters
+  goal_width: 7.32
+  goal_depth: 2.0
+
+team_separation:
+  method: "color_clustering"
+  n_clusters: 2
+
+offside:
+  tolerance_meters: 0.5  # ~50cm VAR tolerance
+  confidence_weights:
+    detection: 0.7
+    position: 0.3
+
+camera_calibration:
+  enabled: true
+  auto_calibrate: true
+  method: "homography"  # or "manual" if points provided
+  reprojection_threshold: 5.0  # meters
+  use_pitch_lines: true
+
+visualization:
+  output_dir: "output/annotated"
+  bbox_thickness: 2
+  attacker_color: [255, 0, 0]      # Red (BGR)
+  defender_color: [0, 0, 255]      # Blue (BGR)
+  ball_color: [0, 255, 0]          # Green (BGR)
+  offside_line_color: [0, 255, 255] # Cyan (BGR)
+  show_calibration_quality: true
+  show_margin_meters: true
+
+llm:
+  enabled: true
+  provider: "gemini"
+  model: "gemini-pro"
+  api_key_env: "GEMINI_API_KEY"
+  use_for_explanations: true   # Generate human-readable explanations
+  use_for_detection: false     # NEVER use LLM for detection (deprecated)
