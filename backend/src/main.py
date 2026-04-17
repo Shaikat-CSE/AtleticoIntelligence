@@ -19,8 +19,8 @@ logging.basicConfig(
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="AtleticoIntelligence - Offside Review System",
-        description="AI-powered soccer incident review system with offside detection",
+        title="AtleticoIntelligence - Match Review System",
+        description="AI-powered soccer incident review system with offside and goal-line checks",
         version="3.0.0"
     )
 
@@ -52,18 +52,21 @@ def create_app() -> FastAPI:
             "user_flow": [
                 "Step 1: POST /api/v1/detect-teams - Upload image to detect team colors",
                 "Step 2: User selects attacking team + direction",
-                "Step 3: POST /api/v1/analyze-offside - Full offside analysis"
+                "Step 3: POST /api/v1/analyze-offside - Full offside analysis",
+                "Step 4: POST /api/v1/check-goal - Goal-line technology style goal check"
             ],
             "endpoints": {
                 "detect_teams": "/api/v1/detect-teams",
                 "analyze_offside": "/api/v1/analyze-offside",
+                "check_goal": "/api/v1/check-goal",
                 "generate_visual": "/api/v1/generate-visual"
             },
             "features": [
                 "YOLOv8 player and ball detection",
                 "K-means team separation by jersey color",
                 "Goalkeeper detection and handling",
-                "Offside line placement based on attacker/defender positions"
+                "Offside line placement based on attacker/defender positions",
+                "Goal-line estimation and goal/no-goal decisions from freeze frames"
             ]
         }
 

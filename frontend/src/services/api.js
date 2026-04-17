@@ -31,6 +31,17 @@ export const detectTeams = async (imageFile) => {
   return response.data
 }
 
+export const checkGoal = async (imageFile, goalDirection = 'right') => {
+  const formData = new FormData()
+  formData.append('image_file', imageFile)
+  formData.append('goal_direction', goalDirection)
+
+  const response = await api.post('/check-goal', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return response.data
+}
+
 export const generateVisual = async (data) => {
   const response = await api.post('/generate-visual', data)
   return response.data

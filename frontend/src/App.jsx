@@ -1,6 +1,7 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import MatchConsole from './pages/MatchConsole'
 import IncidentDetail from './pages/IncidentDetail'
+import GoalCheckConsole from './pages/GoalCheckConsole'
 
 function App() {
   return (
@@ -14,11 +15,23 @@ function App() {
               </div>
               <div>
                 <h1 className="text-xl font-bold text-white">AtleticoIntelligence</h1>
-                <p className="text-gray-400 text-sm">AI-Powered Offside Review System</p>
+                <p className="text-gray-400 text-sm">AI-Powered Match Review System</p>
               </div>
             </div>
             <nav className="flex gap-6">
-              <a href="/" className="text-gray-300 hover:text-accent-neon transition-colors">Match Console</a>
+              <NavLink
+                to="/"
+                className={({ isActive }) => `transition-colors ${isActive ? 'text-accent-neon' : 'text-gray-300 hover:text-accent-neon'}`}
+                end
+              >
+                Offside Review
+              </NavLink>
+              <NavLink
+                to="/goal-check"
+                className={({ isActive }) => `transition-colors ${isActive ? 'text-accent-neon' : 'text-gray-300 hover:text-accent-neon'}`}
+              >
+                Goal Check
+              </NavLink>
             </nav>
           </div>
         </header>
@@ -26,6 +39,7 @@ function App() {
         <main className="p-6 max-w-7xl mx-auto">
           <Routes>
             <Route path="/" element={<MatchConsole />} />
+            <Route path="/goal-check" element={<GoalCheckConsole />} />
             <Route path="/incident/:id" element={<IncidentDetail />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

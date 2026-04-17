@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from ..detection import BoundingBox
-from ..logic import OffsideAnalysisResult
+from ..logic import OffsideAnalysisResult, GoalCheckResult
 
 
 class PitchVisualizer:
@@ -56,6 +56,107 @@ class PitchVisualizer:
 
         if offside_result and offside_result.decision != "UNKNOWN":
             self._draw_offside_analysis(annotated, offside_result, h, w)
+
+        output_path = Path(output_filename)
+        if not output_path.is_absolute():
+            output_path = self.output_dir / output_filename
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), annotated)
+        return str(output_path)
+
+    def annotate_goal_check(
+        self,
+        image: np.ndarray,
+        detection_result,
+        goal_result: GoalCheckResult,
+        output_filename: str = "goal_check.jpg"
+    ) -> str:
+        annotated = image.copy()
+        image_height, _ = annotated.shape[:2]
+
+        if goal_result.ball is not None:
+            self._draw_ball_bbox(annotated, goal_result.ball)
+
+        if goal_result.goal_line_x is not None:
+            line_x = int(round(goal_result.goal_line_x))
+            line_color = (0, 255, 255) if goal_result.goal_line_source == "goalpost+line-assumption" else (0, 200, 255)
+            cv2.line(annotated, (line_x, 0), (line_x, image_height - 1), line_color, 3)
+            cv2.putText(
+                annotated,
+                "GOAL LINE",
+                (max(10, line_x - 70), 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                line_color,
+                2
+            )
+
+        if goal_result.goalpost_x is not None:
+            post_x = int(round(goal_result.goalpost_x))
+            post_color = (255, 255, 255)
+            cv2.line(annotated, (post_x, 0), (post_x, image_height - 1), post_color, 2)
+            cv2.putText(
+                annotated,
+                "POST",
+                (max(10, post_x - 30), min(image_height - 12, 56)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                post_color,
+                2
+            )
+
+        decision_color = (0, 255, 0)
+        if goal_result.decision == "NO GOAL":
+            decision_color = (0, 0, 255)
+        elif goal_result.decision == "UNKNOWN":
+            decision_color = (0, 215, 255)
+
+        cv2.putText(
+            annotated,
+            goal_result.decision,
+            (20, 46),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.4,
+            decision_color,
+            3
+        )
+        cv2.putText(
+            annotated,
+            f"Conf: {goal_result.confidence:.2f}",
+            (20, 78),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            self.text_color,
+            2
+        )
+        cv2.putText(
+            annotated,
+            f"Checked goal: {goal_result.goal_direction.upper()}",
+            (20, 108),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            self.text_color,
+            2
+        )
+        cv2.putText(
+            annotated,
+            f"Margin: {goal_result.goal_margin_pixels:+.1f}px",
+            (20, 138),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            self.text_color,
+            2
+        )
+        cv2.putText(
+            annotated,
+            f"Geometry: {goal_result.goal_line_source}",
+            (20, 168),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            self.text_color,
+            2
+        )
 
         output_path = Path(output_filename)
         if not output_path.is_absolute():
@@ -286,6 +387,18 @@ def annotate_frame(
     visualizer = PitchVisualizer()
     return visualizer.annotate_frame(
         image, detection_result, offside_result, team1, team2, output_filename, attacking_team
+    )
+
+
+def annotate_goal_check(
+    image: np.ndarray,
+    detection_result,
+    goal_result: GoalCheckResult,
+    output_filename: str = "goal_check.jpg"
+) -> str:
+    visualizer = PitchVisualizer()
+    return visualizer.annotate_goal_check(
+        image, detection_result, goal_result, output_filename
     )
 
 

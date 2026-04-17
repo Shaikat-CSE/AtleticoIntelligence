@@ -4,6 +4,11 @@ from .offside_analyzer import (
     OffsideAnalysisResult,
     analyze_offside,
 )
+from .goal_line import (
+    GoalCheckResult,
+    GoalLineAnalyzer,
+    analyze_goal_check,
+)
 
 __all__ = [
     "TeamSeparator",
@@ -13,4 +18,7 @@ __all__ = [
     "OffsideAnalyzer",
     "OffsideAnalysisResult",
     "analyze_offside",
+    "GoalCheckResult",
+    "GoalLineAnalyzer",
+    "analyze_goal_check",
 ]

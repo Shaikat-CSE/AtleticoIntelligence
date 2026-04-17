@@ -8,12 +8,12 @@ import uuid
 import logging
 
 from ..detection import create_detector, BoundingBox
-from ..logic import separate_teams, analyze_offside, TeamInfo
+from ..logic import separate_teams, analyze_offside, analyze_goal_check, TeamInfo
 from ..utils import (
     extract_team_color_profile,
     extract_jersey_color_profile,
 )
-from ..visualization import annotate_frame, generate_offside_svg
+from ..visualization import annotate_frame, annotate_goal_check, generate_offside_svg
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -64,6 +64,23 @@ class OffsideResponse(BaseModel):
     defending_team: str
     team1_info: Optional[TeamInfoResponse] = None
     team2_info: Optional[TeamInfoResponse] = None
+
+
+class GoalCheckResponse(BaseModel):
+    decision: str
+    confidence: float
+    explanation: str
+    goal_direction: str
+    goal_margin_pixels: float
+    goal_line_x: Optional[float] = None
+    goal_line_confidence: float
+    goal_line_source: str
+    goalpost_x: Optional[float] = None
+    goalpost_confidence: float
+    goalpost_source: str
+    ball_detected: bool
+    ball_position: Optional[Position] = None
+    annotated_image_url: Optional[str] = None
 
 
 class TeamDetectionResponse(BaseModel):
@@ -795,6 +812,71 @@ async def analyze_offside_endpoint(
         defending_team=structured_data["defending_team"],
         team1_info=TeamInfoResponse(**structured_data["team1_info"]) if structured_data.get("team1_info") else None,
         team2_info=TeamInfoResponse(**structured_data["team2_info"]) if structured_data.get("team2_info") else None
+    )
+
+
+@router.post("/check-goal", response_model=GoalCheckResponse)
+async def check_goal_endpoint(
+    image_file: UploadFile = File(...),
+    goal_direction: str = Form("right")
+):
+    if goal_direction not in ["left", "right"]:
+        raise HTTPException(status_code=400, detail="goal_direction must be 'left' or 'right'")
+
+    contents = await image_file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+
+    nparr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    detector = detector_state.get()
+    detection_result = detector.detect(image)
+
+    logger.info(
+        f"[Goal Check] Geometry-only review: ball={detection_result.ball is not None}, "
+        f"ball_candidates={len(getattr(detection_result, 'ball_candidates', []))}, "
+        f"goal_direction={goal_direction}"
+    )
+
+    goal_result = analyze_goal_check(image, detection_result, goal_direction)
+
+    file_id = str(uuid.uuid4())[:8]
+    annotated_filename = f"goalcheck_{file_id}.jpg"
+    annotated_path = ANNOTATED_DIR / annotated_filename
+    result_path = annotate_goal_check(
+        image,
+        detection_result,
+        goal_result,
+        output_filename=str(annotated_path)
+    )
+    logger.info(f"[Goal Check] Annotated image saved: {result_path}")
+
+    ball_position = None
+    if goal_result.ball is not None:
+        ball_position = Position(
+            x=float(goal_result.ball.center[0]),
+            y=float(goal_result.ball.center[1])
+        )
+
+    return GoalCheckResponse(
+        decision=goal_result.decision,
+        confidence=float(goal_result.confidence),
+        explanation=goal_result.explanation,
+        goal_direction=goal_result.goal_direction,
+        goal_margin_pixels=float(goal_result.goal_margin_pixels),
+        goal_line_x=float(goal_result.goal_line_x) if goal_result.goal_line_x is not None else None,
+        goal_line_confidence=float(goal_result.goal_line_confidence),
+        goal_line_source=goal_result.goal_line_source,
+        goalpost_x=float(goal_result.goalpost_x) if goal_result.goalpost_x is not None else None,
+        goalpost_confidence=float(goal_result.goalpost_confidence),
+        goalpost_source=goal_result.goalpost_source,
+        ball_detected=bool(goal_result.ball is not None),
+        ball_position=ball_position,
+        annotated_image_url=f"/annotated/{annotated_filename}"
     )
 
 
