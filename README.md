@@ -1,267 +1,323 @@
-# AtleticoIntelligence
+# ⚽ AtleticoIntelligence
 
-AI-powered soccer offside review system for match officials with geometric perspective correction.
+### AI-Powered Soccer Offside Review System
 
-## What's New in v2.0
+---
 
-**MAJOR CHANGE:** Replaced LLM Vision detection with geometric calculations using camera calibration and homography transforms. This provides deterministic, mathematically accurate offside decisions instead of AI guessing.
+<div align="center">
 
-**Key improvements:**
-- ✅ Perspective-corrected offside line (not just vertical)
-- ✅ Real-world pitch coordinates (meters, not pixels)
-- ✅ 50cm VAR tolerance standard
-- ✅ Deterministic results (same input = same output)
-- ✅ Faster (no API calls for detection)
-- ✅ Offside margin in meters
-- ✅ Calibration quality indicator
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green.svg?style=flat-square&logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB.svg?style=flat-square&logo=react&logoColor=white)
+![YOLOv8](https://img.shields.io/badge/YOLOv8-Computer%20Vision-red.svg?style=flat-square&logo=tensorflow&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)
 
-**Removed:** LLM Vision and Hybrid detection modes (fundamentally flawed for geometric problems)
+**Deterministic offside decisions using geometric perspective correction — not LLM guessing.**
 
-## Overview
+[Features](#features) • [Architecture](#architecture) • [Quick Start](#quick-start) • [API](#api) • [Tech Stack](#tech-stack)
 
-A human-in-the-loop system where officials select a frame from video, and AI analyzes it for offside decisions using computer vision and geometric calculations.
+</div>
 
-**How it works:**
-1. Official uploads video or image
-2. Scrub video to desired frame (or use image directly)
-3. Click "Review This Frame" or "Analyze This Image"
-4. **YOLOv8** detects players and ball
-5. **K-means** clustering separates teams by jersey color
-6. **Camera calibration** computes homography matrix from pitch lines
-7. **Geometric transformation** converts pixels to pitch coordinates (meters)
-8. **Offside analysis** compares positions in real-world space
-9. Returns OFFSIDE/ONSIDE verdict with perspective-corrected visualization
-10. **LLM** generates human-readable explanation (post-detection only)
+---
 
-## Quick Start
+## 🎯 Overview
+
+AtleticoIntelligence is a **human-in-the-loop** system for match officials that provides mathematically accurate offside decisions using computer vision and geometric calculations.
+
+> **v2.0 Note:** Replaced LLM-based detection with pure geometric algorithms. Same input always produces the same output — no guessing, no hallucinations.
+
+### Why Geometric Over LLM?
+
+| Aspect | LLM Vision | Geometric Calculation |
+|--------|------------|----------------------|
+| **Accuracy** | Pattern matching guesses | Mathematical precision |
+| **Perspective** | Cannot correct camera angles | Homography transformation |
+| **Consistency** | Variable outputs | Deterministic results |
+| **Speed** | API latency | Real-time local inference |
+| **Offside Margin** | Arbitrary confidence | Exact meters |
+
+---
+
+## ✨ Features
+
+- 🔍 **YOLOv8 Detection** — Real-time player, ball, goalkeeper, and referee detection
+- 🎨 **K-means Team Separation** — Jersey color clustering in LAB color space
+- 📐 **Camera Calibration** — Homography matrix for pixel-to-meter transformation
+- 📏 **Geometric Offside Analysis** — Perspective-corrected positions in real-world coordinates
+- 🎯 **VAR Standard Tolerance** — 50cm offside margin tolerance
+- ⚽ **Goal-Line Technology** — Ball position vs goal line verification
+- 📊 **SVG Pitch Diagrams** — Top-down visualization with offside lines
+- 🖼️ **Annotated Frames** — OpenCV overlays with team colors and markers
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              BROWSER                                    │
+│                           (React Frontend)                              │
+│                    localhost:3000  │  Vite Proxy                       │
+└─────────────────────────────────────┼───────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           FASTAPI BACKEND                               │
+│                           localhost:8000                                │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐  │
+│  │  /detect-   │  │  /analyze-   │  │  /check-    │  │  /generate-  │  │
+│  │  teams      │  │  offside     │  │  goal       │  │  visual      │  │
+│  └─────────────┘  └──────────────┘  └─────────────┘  └──────────────┘  │
+│         │                │                │                │           │
+│         └────────────────┴────────────────┴────────────────┘           │
+│                              │
+│         ┌────────────────────┴────────────────────┐                    │
+│         ▼                                         ▼                    │
+│  ┌──────────────────┐                    ┌──────────────────┐            │
+│  │   YOLOv8         │                    │   Geometric     │            │
+│  │   Detector       │                    │   Analyzer      │            │
+│  │   (Players/Ball) │                    │   (Homography)  │            │
+│  └──────────────────┘                    └──────────────────┘            │
+│         │                                         │                      │
+│         ▼                                         ▼                      │
+│  ┌──────────────────┐                    ┌──────────────────┐            │
+│  │  Team Separation │                    │  Offside Engine  │            │
+│  │  (K-means LAB)   │                    │  (Metric Space)  │            │
+│  └──────────────────┘                    └──────────────────┘            │
+│                                                               │
+└───────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+                           ┌──────────────────┐
+                           │   File Output    │
+                           │  /output/*       │
+                           └──────────────────┘
+```
+
+### Detection Pipeline
+
+```
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+│  Image  │───▶│  YOLOv8 │───▶│ K-means │───▶│ Camera  │───▶│ Geometric│
+│ Input   │    │ Detect  │    │  Teams  │    │Calibrate│    │ Analyze  │
+└─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
+                                                              │
+                                         ┌────────────────────┴────────────┐
+                                         ▼                                 ▼
+                                  ┌─────────────┐                  ┌─────────────┐
+                                  │   OFFSIDE   │                  │   ONSIDE    │
+                                  │  /ONSIDE    │                  │  Decision   │
+                                  └─────────────┘                  └─────────────┘
+                                         │
+                                         ▼
+                              ┌─────────────────────┐
+                              │  SVG + Annotations  │
+                              └─────────────────────┘
+```
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Python** 3.9+
+- **Node.js** 18+
+- **4GB+ RAM**
 
 ### 1. Start Backend
 
 ```bash
 cd backend
 
+# Install dependencies
 pip install -r requirements.txt
 
-set GEMINI_API_KEY=your-key   # Windows (optional, for explanations only)
-export GEMINI_API_KEY=your-key  # Mac/Linux (optional, for explanations only)
-
+# Start server
 python -m src.main
 ```
 
-Backend runs at `http://localhost:8000`
+> Backend runs at `http://localhost:8000`
 
-### 2. Start Frontend (separate terminal)
+### 2. Start Frontend
 
 ```bash
 cd frontend
 
+# Install dependencies
 npm install
 
+# Start dev server
 npm run dev
 ```
 
-Frontend runs at `http://localhost:3000`
+> Frontend runs at `http://localhost:3000`
 
-### 3. Test
+### 3. Use the System
 
 1. Open `http://localhost:3000`
-2. Upload a football image (player(s) + ball)
-3. Click "Analyze This Image"
-4. View result with calibration quality and offside margin
+2. Upload a football match image or video
+3. Select the **attacking team** and **goal direction**
+4. Click **Analyze**
+5. View the offside verdict with annotated frame and pitch diagram
 
-## Project Structure
+---
 
-```
-AtleticoIntelligence/
-├── backend/
-│   ├── src/
-│   │   ├── api/endpoints.py          # FastAPI endpoints
-│   │   ├── detection/yolo_detector.py    # YOLOv8 detection
-│   │   ├── logic/
-│   │   │   ├── camera_calibration.py  # NEW: Homography calibration
-│   │   │   ├── team_separation.py     # Jersey color clustering
-│   │   │   └── offside_analyzer.py    # Geometric offside logic
-│   │   └── visualization/
-│   │       ├── annotator.py           # OpenCV annotations
-│   │       ├── svg_generator.py       # Top-down pitch SVG
-│   │       ├── llm_integration.py     # Explanations only
-│   │       └── vision_analyzer.py     # DEPRECATED
-│   └── config.yaml
-└── frontend/
-    └── src/
-        ├── components/
-        │   ├── VideoPlayer.jsx     # Upload + frame capture
-        │   ├── VerdictDisplay.jsx  # Result overlay with new fields
-        │   └── SVGViewer.jsx       # Pitch diagram
-        ├── pages/
-        │   ├── MatchConsole.jsx    # Main page
-        │   └── IncidentDetail.jsx
-        └── services/api.js         # API client
-```
+## 📡 API Reference
 
-## API Endpoints
+### Core Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/analyze-frame` | POST | Upload image → get offside verdict (auto calibration) |
-| `/api/v1/analyze-with-calibration` | POST | Upload image with manual calibration points |
+| `/api/v1/detect-teams` | POST | Detect teams from image |
+| `/api/v1/analyze-offside` | POST | Full offside analysis |
+| `/api/v1/check-goal` | POST | Goal-line technology check |
 | `/api/v1/generate-visual` | POST | Generate SVG pitch diagram |
 | `/health` | GET | Health check |
 
-**Removed endpoints:**
-- ~~`/api/v1/analyze-frame-vision`~~ (LLM Vision - removed)
-- ~~`/api/v1/analyze-frame-hybrid`~~ (Hybrid - removed)
-
-### Analyze Frame
+### Analyze Offside
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/analyze-frame" \
+curl -X POST "http://localhost:8000/api/v1/analyze-offside" \
   -F "image_file=@frame.jpg" \
-  -F "goal_direction=right"
+  -F "goal_direction=right" \
+  -F "attacking_team=team1"
 ```
 
-Response:
+**Response:**
+
 ```json
 {
   "decision": "OFFSIDE",
   "confidence": 0.92,
   "attacker_foot": {"x": 650.0, "y": 200.0},
   "defender_foot": {"x": 540.0, "y": 200.0},
+  "offside_margin_pixels": 110.0,
+  "offside_margin_meters": 0.85,
   "annotated_image_url": "/annotated/annotated_abc123.jpg",
-  "svg_url": "/pitch_abc123.svg",
-  "explanation": "The attacker is 0.85m offside...",
-  "calibration_quality": "good",
-  "offside_margin_meters": 0.85
+  "svg_url": "/pitch/pitch_abc123.svg",
+  "attacking_team": "team1",
+  "team1_info": {
+    "color_name": "red",
+    "color_rgb": [255, 0, 0],
+    "player_count": 6,
+    "goalkeeper": {"x": 120, "y": 200}
+  },
+  "team2_info": {
+    "color_name": "blue",
+    "color_rgb": [0, 0, 255],
+    "player_count": 5,
+    "goalkeeper": {"x": 80, "y": 200}
+  }
 }
 ```
 
-### Analyze with Manual Calibration
+---
 
-For higher accuracy, provide the 4 pitch corner coordinates:
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/analyze-with-calibration" \
-  -F "image_file=@frame.jpg" \
-  -F "goal_direction=right" \
-  -F "pitch_top_left_x=100" \
-  -F "pitch_top_left_y=50" \
-  -F "pitch_top_right_x=1180" \
-  -F "pitch_top_right_y=50" \
-  -F "pitch_bottom_right_x=1220" \
-  -F "pitch_bottom_right_y=670" \
-  -F "pitch_bottom_left_x=60" \
-  -F "pitch_bottom_left_y=670"
-```
-
-## Architecture v2.0
+## 📁 Project Structure
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Browser   │────▶│  FastAPI    │────▶│  YOLOv8     │
-│   (React)   │◀────│  Backend    │◀────│  Detector   │
-└─────────────┘     └─────────────┘     └─────────────┘
-                            │
-                            ▼
-                    ┌─────────────────┐
-                    │ Camera Calibrator│
-                    │  (Homography)    │
-                    └─────────────────┘
-                            │
-                            ▼
-                    ┌─────────────────┐
-                    │ Geometric Offside│
-                    │  Analyzer (meters)│
-                    └─────────────────┘
-                            │
-                            ▼
-                    ┌─────────────────┐
-                    │   LLM (Gemini)  │
-                    │ (explanation ONLY)│
-                    └─────────────────┘
+AtleticoIntelligence/
+├── backend/
+│   ├── src/
+│   │   ├── main.py                      # FastAPI entry point
+│   │   ├── api/
+│   │   │   └── endpoints.py             # All API endpoints
+│   │   ├── detection/
+│   │   │   └── yolo_detector.py         # YOLOv8 player/ball detection
+│   │   ├── logic/
+│   │   │   ├── team_separation.py       # K-means jersey color clustering
+│   │   │   ├── offside_analyzer.py      # Geometric offside calculations
+│   │   │   └── goal_line.py             # Goal-line technology
+│   │   ├── visualization/
+│   │   │   ├── annotator.py             # OpenCV frame annotation
+│   │   │   └── svg_generator.py         # SVG pitch diagram generation
+│   │   └── utils/
+│   │       ├── config.py                # YAML config loader
+│   │       └── colors.py                # Jersey color extraction
+│   ├── config.yaml                      # Configuration file
+│   └── requirements.txt                 # Python dependencies
+│
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx                      # Router setup
+│   │   ├── components/
+│   │   │   ├── VideoPlayer.jsx          # Upload + frame capture
+│   │   │   ├── VerdictDisplay.jsx       # Result overlay
+│   │   │   ├── GoalCheckDisplay.jsx     # Goal check results
+│   │   │   └── SVGViewer.jsx            # SVG pitch viewer
+│   │   ├── pages/
+│   │   │   ├── MatchConsole.jsx         # Main offside review page
+│   │   │   ├── GoalCheckConsole.jsx      # Goal check page
+│   │   │   └── IncidentDetail.jsx        # Incident detail page
+│   │   └── services/
+│   │       └── api.js                   # API client
+│   ├── package.json
+│   └── vite.config.js                   # Vite + API proxy config
+│
+└── README.md
 ```
 
-## Detection Pipeline v2.0
+---
 
-1. **Image Input** → YOLOv8 detects players (class 0) and ball (class 32)
-2. **Team Separation** → K-means clustering on jersey colors
-3. **Camera Calibration** → Auto-detect pitch lines or use defaults
-4. **Homography** → Compute H matrix for pixel-to-meter transformation
-5. **Position Extraction** → Transform foot positions to pitch coordinates
-6. **Offside Analysis** → Compare in metric space with 50cm tolerance
-7. **Decision** → `attacker_x > defender_x + 0.5m → OFFSIDE`
-8. **Visualization** → Perspective-corrected offside line
-9. **Explanation** → LLM generates human-readable text
-
-## Configuration
+## ⚙️ Configuration
 
 `backend/config.yaml`:
 
 ```yaml
 detection:
-  model_path: "yolov8n.pt"
+  player_model_path: "uisikdag/yolo-v8-football-players-detection"
   confidence_threshold: 0.25
+  ball_confidence_threshold: 0.01
+
+pitch:
+  width: 105.0        # meters
+  height: 68.0        # meters
+  goal_width: 7.32    # meters
 
 offside:
-  tolerance_meters: 0.5  # VAR standard
+  tolerance_meters: 0.5   # VAR standard
 
 camera_calibration:
   enabled: true
   auto_calibrate: true
   reprojection_threshold: 5.0
 
-llm:
-  enabled: true
-  provider: "gemini"
-  model: "gemini-pro"
-  use_for_explanations: true   # Generate human-readable text
-  use_for_detection: false     # NEVER enable - deprecated
+visualization:
+  attacker_color: [255, 0, 0]    # Red (BGR)
+  defender_color: [0, 0, 255]    # Blue (BGR)
+  ball_color: [0, 255, 0]        # Green (BGR)
 ```
 
-## Why Remove LLM Vision?
+---
 
-| Problem | Why It Failed |
-|---------|---------------|
-| **Geometric accuracy** | LLMs can't calculate 3D positions from 2D images |
-| **Perspective** | No mathematical basis for correcting camera angles |
-| **Consistency** | Same input could produce different outputs |
-| **Confidence scores** | Arbitrary (how confident the LLM is in its guess) |
-| **Speed** | Slow API calls vs fast local computation |
+## 🧠 Tech Stack
 
-**The hard truth:** LLMs are pattern matchers, not geometric calculators. Offside detection requires mathematical transformations (homography) that LLMs cannot perform accurately.
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Backend** | FastAPI | REST API server |
+| **Detection** | YOLOv8 (Ultralytics) | Player/ball detection |
+| **Vision** | OpenCV | Image processing |
+| **ML** | scikit-learn | K-means clustering |
+| **Math** | NumPy | Geometric calculations |
+| **Frontend** | React 18 + Vite | UI framework |
+| **Styling** | Tailwind CSS | Styling |
+| **Routing** | React Router DOM | SPA navigation |
+| **HTTP** | Axios | API client |
 
-## Calibration Quality Indicator
+---
 
-The system displays calibration quality:
+## 📜 Version History
 
-- 🟢 **GOOD** - Reprojection error < 2m (high accuracy)
-- 🟡 **POOR** - Reprojection error 2-5m (acceptable)
-- 🔴 **FALLBACK** - Auto-calibration failed, using defaults
-- ⚪ **FAILED** - Could not calibrate
+| Version | Changes |
+|---------|---------|
+| **v2.0** | Replaced LLM Vision with geometric perspective correction using homography transforms |
+| **v1.0** | Initial release with YOLO detection and Gemini explanations |
 
-For best results, use manual calibration with known pitch corner positions.
+---
 
-## Requirements
+<div align="center">
 
-**Backend:** Python 3.9+, 4GB+ RAM, OpenCV
-**Frontend:** Node.js 18+
+**Built for match officials who need deterministic, mathematically accurate offside decisions.**
 
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend API | FastAPI |
-| Detection | YOLOv8 (ultralytics) |
-| Team Separation | OpenCV + scikit-learn |
-| Camera Calibration | OpenCV (homography) |
-| Offside Analysis | NumPy geometric calculations |
-| LLM | Google Gemini (explanations only) |
-| Frontend | React + Vite + Tailwind |
-
-## Version History
-
-- **v2.0** - Replaced LLM Vision with geometric perspective correction
-- **v1.0** - Initial release with YOLO detection and LLM explanations
-
-## License
-
-MIT
+</div>
