@@ -128,11 +128,20 @@ class SVGPitchGenerator:
             bx, by = to_svg_coords(ball_pos[0], ball_pos[1])
             svg.append(f'<circle cx="{bx}" cy="{by}" r="6" class="ball"/>')
 
-        # Draw offside line at attacker's position (golden dashed vertical line)
-        # This shows where the attacker (with ball) is positioned
-        if attacker_pos[0] > 0 and attacker_pos[1] > 0:
-            ax, _ = to_svg_coords(attacker_pos[0], 0)
-            svg.append(f'<line x1="{ax}" y1="10" x2="{ax}" y2="670" class="offside-line"/>')
+        # Draw offside line based on decision:
+        # - OFFSIDE: line at attacker's position (attacker is ahead)
+        # - ONSIDE: line at defender's position (defender is ahead)
+        line_x = None
+        if decision == "OFFSIDE":
+            line_x = attacker_pos[0] if attacker_pos[0] > 0 else defender_pos[0]
+        else:  # ONSIDE
+            line_x = defender_pos[0] if defender_pos[0] > 0 else attacker_pos[0]
+        
+        if line_x is not None and line_x > 0:
+            lx, _ = to_svg_coords(line_x, 0)
+            svg.append(f'<line x1="{lx}" y1="10" x2="{lx}" y2="670" class="offside-line"/>')
+            line_label = "OFFSIDE LINE" if decision == "OFFSIDE" else "ONSIDE LINE"
+            svg.append(f'<text x="{lx}" y="80" class="label" style="font-weight: bold; fill: #ffd700;">{line_label}</text>')
 
         decision_class = "decision-offside" if decision == "OFFSIDE" else "decision-onside"
         svg.append(f'<text x="{w//2}" y="30" class="decision {decision_class}" text-anchor="middle">{decision}</text>')

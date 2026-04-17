@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -9,7 +9,7 @@ import uuid
 import logging
 
 from ..detection import create_detector, BoundingBox
-from ..logic import separate_teams, analyze_offside, CameraCalibrator, create_calibrator
+from ..logic import separate_teams, analyze_offside, get_team_info, TeamInfo
 from ..visualization import annotate_frame, generate_offside_svg
 
 router = APIRouter()
@@ -27,6 +27,13 @@ class Position(BaseModel):
     y: float
 
 
+class TeamInfoResponse(BaseModel):
+    team_id: str
+    color_name: str
+    color_bgr: tuple
+    player_count: int
+
+
 class OffsideResponse(BaseModel):
     decision: str
     confidence: float
@@ -35,137 +42,153 @@ class OffsideResponse(BaseModel):
     attacker_foot: Position
     defender_foot: Position
     explanation: str
-    annotated_image_url: str
+    annotated_image_url: Optional[str] = None
     svg_url: Optional[str] = None
-    calibration_quality: str
-    offside_margin_meters: float
+    offside_margin_pixels: float
+    attacking_team: str
+    defending_team: str
+    team1_info: Optional[TeamInfoResponse] = None
+    team2_info: Optional[TeamInfoResponse] = None
 
 
-class VisualizationRequest(BaseModel):
-    attacker_position: Position
-    defender_position: Position
-    ball_position: Optional[Position] = None
-    offside_line_x: Optional[float] = None
-    decision: str
-    generate_explanation: bool = True
-
-
-class VisualizationResponse(BaseModel):
-    svg_content: str
-    explanation: Optional[str] = None
+class TeamDetectionResponse(BaseModel):
+    team1_info: Optional[TeamInfoResponse] = None
+    team2_info: Optional[TeamInfoResponse] = None
+    player_count: int
+    ball_detected: bool
 
 
 class DetectorState:
-    """Simple state management for detector."""
     def __init__(self):
         self._detector = None
     
     def get(self):
         if self._detector is None:
             logger.info("Initializing YOLO detector...")
-            self._detector = create_detector("yolov8n.pt", confidence_threshold=0.25, ball_confidence_threshold=0.05)
+            self._detector = create_detector("uisikdag/yolo-v8-football-players-detection", confidence_threshold=0.25, ball_confidence_threshold=0.01)
         return self._detector
 
 
 detector_state = DetectorState()
 
 
-def process_frame_analysis(
-    image: np.ndarray, 
-    goal_direction: str = "right",
-    calibrator: Optional[CameraCalibrator] = None,
-    attacking_team: Optional[str] = None
-) -> dict:
+@router.post("/detect-teams", response_model=TeamDetectionResponse)
+async def detect_teams(image_file: UploadFile = File(...)):
     """
-    Process a frame through the geometric offside detection pipeline.
+    Step 1: Upload image -> Detect Teams
     
-    Args:
-        image: Input image
-        goal_direction: Direction of opponent's goal ("left" or "right")
-        calibrator: Optional pre-calibrated camera
-        attacking_team: Optional "team1" or "team2" to manually specify attacking team
-        
-    Returns:
-        Dictionary with analysis results and file paths
+    Returns team colors for user selection.
     """
-    h, w = image.shape[:2]
-    logger.info(f"[Analysis] Image shape: {image.shape}")
+    contents = await image_file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
     
-    # Step 1: Detect players and ball
+    nparr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    
     detector = detector_state.get()
     detection_result = detector.detect(image)
     
-    logger.info(
-        f"[Detection] Found {len(detection_result.players)} players, "
-        f"ball={detection_result.ball is not None}"
-    )
+    logger.info(f"[Team Detection] Found {len(detection_result.players)} players, {len(detection_result.goalkeepers)} goalkeepers, ball={detection_result.ball is not None}")
     
     if len(detection_result.players) < 2:
-        logger.warning("[Analysis] Insufficient players detected")
-        return {
-            "error": "Need at least 2 players for offside analysis",
-            "structured_data": {
-                "decision": "UNKNOWN",
-                "attacker_position": {"x": 0, "y": 0},
-                "defender_position": {"x": 0, "y": 0},
-                "attacker_foot": {"x": 0, "y": 0},
-                "defender_foot": {"x": 0, "y": 0},
-                "confidence": 0.0,
-                "calibration_quality": "failed",
-                "offside_margin_meters": 0.0
-            },
-            "annotated_url": None,
-            "svg_url": None,
-            "file_id": None
-        }
+        raise HTTPException(status_code=422, detail=f"Need at least 2 players to detect teams. Found: {len(detection_result.players)}")
     
-    # Step 2: Separate teams by jersey color
+    team1_info, team2_info = get_team_info(detection_result.players, image)
+    
+    if team1_info is None or team2_info is None:
+        raise HTTPException(status_code=422, detail="Could not separate teams into two groups")
+    
+    def convert_color(color):
+        if color is None:
+            return (0, 0, 0)
+        return (int(color[0]), int(color[1]), int(color[2]))
+    
+    return TeamDetectionResponse(
+        team1_info=TeamInfoResponse(
+            team_id="team1",
+            color_name=str(team1_info.color_name),
+            color_bgr=convert_color(team1_info.color_bgr),
+            player_count=int(len(team1_info.players))
+        ),
+        team2_info=TeamInfoResponse(
+            team_id="team2",
+            color_name=str(team2_info.color_name),
+            color_bgr=convert_color(team2_info.color_bgr),
+            player_count=int(len(team2_info.players))
+        ),
+        player_count=int(len(detection_result.players)),
+        ball_detected=bool(detection_result.ball is not None)
+    )
+
+
+@router.post("/analyze-offside", response_model=OffsideResponse)
+async def analyze_offside_endpoint(
+    image_file: UploadFile = File(...),
+    attacking_team: str = Form(...),
+    goal_direction: str = Form("right")
+):
+    """
+    Step 3: Click "Analyze Offside" -> Full analysis with user's selection
+    
+    User provides:
+    - attacking_team: "team1" or "team2"
+    - goal_direction: "left" or "right" (direction of the goal being attacked)
+    """
+    if attacking_team not in ["team1", "team2"]:
+        raise HTTPException(status_code=400, detail="attacking_team must be 'team1' or 'team2'")
+    
+    if goal_direction not in ["left", "right"]:
+        raise HTTPException(status_code=400, detail="goal_direction must be 'left' or 'right'")
+    
+    contents = await image_file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+    
+    nparr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+    
+    h, w = image.shape[:2]
+    logger.info(f"[Analysis] Image shape: {image.shape}, attacking_team={attacking_team}, goal_direction={goal_direction}")
+    
+    detector = detector_state.get()
+    detection_result = detector.detect(image)
+    
+    logger.info(f"[Detection] Found {len(detection_result.players)} players, {len(detection_result.goalkeepers)} goalkeepers, ball={detection_result.ball is not None}")
+    
+    if len(detection_result.players) < 2:
+        raise HTTPException(status_code=422, detail="Need at least 2 players for offside analysis")
+    
     team1, team2 = separate_teams(detection_result.players, image)
+    team1_info, team2_info = get_team_info(detection_result.players, image)
+    
     logger.info(f"[Teams] Team 1: {len(team1)} players, Team 2: {len(team2)} players")
     
     if not team1 or not team2:
-        logger.warning("[Analysis] Could not separate teams")
-        return {
-            "error": "Could not separate teams",
-            "structured_data": {
-                "decision": "UNKNOWN",
-                "attacker_position": {"x": 0, "y": 0},
-                "defender_position": {"x": 0, "y": 0},
-                "attacker_foot": {"x": 0, "y": 0},
-                "defender_foot": {"x": 0, "y": 0},
-                "confidence": 0.0,
-                "calibration_quality": "failed",
-                "offside_margin_meters": 0.0
-            },
-            "annotated_url": None,
-            "svg_url": None,
-            "file_id": None
-        }
+        raise HTTPException(status_code=422, detail="Could not separate teams")
     
-    # Step 3: Calibrate camera if not provided
-    if calibrator is None:
-        calibrator = create_calibrator(image)
-        logger.info("[Calibration] Auto-calibrated camera")
-    
-    # Get ball position if detected
     ball_pos = detection_result.ball.foot_position if detection_result.ball else None
     if ball_pos:
         logger.info(f"[Ball] Ball position: ({ball_pos[0]:.0f}, {ball_pos[1]:.0f})")
     
-    # Step 4: Geometric offside analysis with perspective correction
     offside_result = analyze_offside(
-        team1, 
-        team2, 
-        goal_direction=goal_direction,
-        image=image,
-        calibrator=calibrator,
+        team1=team1,
+        team2=team2,
         ball_position=ball_pos,
-        attacking_team=attacking_team
+        attacking_team_input=attacking_team,
+        team1_info=team1_info,
+        team2_info=team2_info,
+        goal_direction=goal_direction
     )
     
     file_id = str(uuid.uuid4())[:8]
     
-    # Step 5: Generate annotated image
     annotated_filename = f"annotated_{file_id}.jpg"
     annotated_path = ANNOTATED_DIR / annotated_filename
     
@@ -176,28 +199,20 @@ def process_frame_analysis(
     logger.info(f"[Output] Annotated image saved: {result_path}")
     annotated_url = f"/annotated/{annotated_filename}"
     
-    # Step 6: Generate SVG visualization
-    import time
-    svg_filename = f"pitch_{file_id}_{goal_direction}_{int(time.time())}.svg"
+    svg_filename = f"pitch_{file_id}_{goal_direction}_{int(uuid.uuid4().time)}.svg"
     svg_path = OUTPUT_DIR / svg_filename
     
-    # Use RAW YOLO foot positions for drawing attacker/defender in SVG
-    # Scale image coords to SVG viewBox (scale by ratio of SVG size to image size)
-    svg_w = 1050  # SVG viewBox width (pitch_width * 10)
-    svg_h = 680   # SVG viewBox height (pitch_height * 10)
-    scale_x_svg = svg_w / w
-    scale_y_svg = svg_h / h
+    scale_x_svg = 1050 / w
+    scale_y_svg = 680 / h
     
-    # Raw YOLO positions for attacker/defender/goalkeeper markers
     attacker_foot = offside_result.attacker.foot_position
     defender_foot = offside_result.second_last_defender.foot_position
     goalkeeper_foot = offside_result.goalkeeper.foot_position if offside_result.goalkeeper else (0, 0)
+    
     attacker_pos = (attacker_foot[0] * scale_x_svg, attacker_foot[1] * scale_y_svg)
     defender_pos = (defender_foot[0] * scale_x_svg, defender_foot[1] * scale_y_svg)
     goalkeeper_pos = (goalkeeper_foot[0] * scale_x_svg, goalkeeper_foot[1] * scale_y_svg)
     
-    # Get team positions in SVG coordinates (raw YOLO positions)
-    # Exclude attacker, defender, and goalkeeper to avoid double drawing
     excluded_positions = [attacker_foot, defender_foot, goalkeeper_foot]
     team1_positions = []
     team2_positions = []
@@ -208,13 +223,11 @@ def process_frame_analysis(
         if p.foot_position not in excluded_positions:
             team2_positions.append((p.foot_position[0] * scale_x_svg, p.foot_position[1] * scale_y_svg))
     
-    # Ball position in SVG coordinates (raw YOLO)
     ball_pos_scaled = None
     if ball_pos is not None:
         ball_pos_scaled = (ball_pos[0] * scale_x_svg, ball_pos[1] * scale_y_svg)
     
-    # Offside line: drawn at attacker's X position (player with ball)
-    offside_line_x_val = attacker_pos[0]
+    offside_line_x_val = defender_pos[0]
     
     svg_content = generate_offside_svg(
         attacker_pos=attacker_pos,
@@ -230,17 +243,21 @@ def process_frame_analysis(
         image_width=w,
         image_height=h,
         output_path=str(svg_path),
-        attacking_team=attacking_team or "team1",
+        attacking_team=attacking_team,
         goal_direction=goal_direction
     )
     logger.info(f"[Output] SVG saved: {svg_path}")
     svg_url = f"/pitch/{svg_filename}"
     
-    # Step 7: Prepare structured data for response
     def safe_float(val):
         if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
             return 0.0
         return val
+    
+    def convert_color(color):
+        if color is None:
+            return (0, 0, 0)
+        return (int(color[0]), int(color[1]), int(color[2]))
     
     structured_data = {
         "decision": offside_result.decision,
@@ -249,158 +266,65 @@ def process_frame_analysis(
         "attacker_foot": {"x": safe_float(offside_result.attacker.foot_position[0]), "y": safe_float(offside_result.attacker.foot_position[1])},
         "defender_foot": {"x": safe_float(offside_result.second_last_defender.foot_position[0]), "y": safe_float(offside_result.second_last_defender.foot_position[1])},
         "confidence": safe_float(offside_result.confidence),
-        "calibration_quality": offside_result.calibration_quality,
-        "offside_margin_meters": safe_float(offside_result.offside_margin_meters)
+        "offside_margin_pixels": safe_float(offside_result.offside_margin_pixels),
+        "attacking_team": offside_result.attacking_team,
+        "defending_team": offside_result.defending_team,
+        "team1_info": {
+            "team_id": "team1",
+            "color_name": str(team1_info.color_name) if team1_info else "Unknown",
+            "color_bgr": convert_color(team1_info.color_bgr) if team1_info else (0, 0, 0),
+            "player_count": int(len(team1))
+        } if team1_info else None,
+        "team2_info": {
+            "team_id": "team2",
+            "color_name": str(team2_info.color_name) if team2_info else "Unknown",
+            "color_bgr": convert_color(team2_info.color_bgr) if team2_info else (0, 0, 0),
+            "player_count": int(len(team2))
+        } if team2_info else None
     }
     
-    return {
-        "structured_data": structured_data,
-        "annotated_url": annotated_url,
-        "svg_url": svg_url,
-        "svg_content": svg_content,
-        "file_id": file_id
-    }
+    explanation = f"{structured_data['decision']} - Attacker ahead by {structured_data['offside_margin_pixels']:.1f} pixels" if structured_data['decision'] != "UNKNOWN" else "Analysis could not be completed"
+    
+    return OffsideResponse(
+        decision=structured_data["decision"],
+        confidence=structured_data["confidence"],
+        attacker_position=Position(**structured_data["attacker_position"]),
+        defender_position=Position(**structured_data["defender_position"]),
+        attacker_foot=Position(**structured_data["attacker_foot"]),
+        defender_foot=Position(**structured_data["defender_foot"]),
+        explanation=explanation,
+        annotated_image_url=annotated_url,
+        svg_url=svg_url,
+        offside_margin_pixels=structured_data["offside_margin_pixels"],
+        attacking_team=structured_data["attacking_team"],
+        defending_team=structured_data["defending_team"],
+        team1_info=TeamInfoResponse(**structured_data["team1_info"]) if structured_data.get("team1_info") else None,
+        team2_info=TeamInfoResponse(**structured_data["team2_info"]) if structured_data.get("team2_info") else None
+    )
 
 
-@router.post("/analyze-frame", response_model=OffsideResponse)
-async def analyze_frame(
-    image_file: UploadFile = File(...),
+@router.post("/generate-visual")
+async def generate_visual(
+    attacker_x: float = Form(...),
+    attacker_y: float = Form(...),
+    defender_x: float = Form(...),
+    defender_y: float = Form(...),
+    decision: str = Form(...),
+    ball_x: Optional[float] = Form(None),
+    ball_y: Optional[float] = Form(None),
     goal_direction: str = Form("right"),
-    attacking_team: Optional[str] = Form(None),
+    attacking_team: str = Form("team1")
 ):
-    """
-    Analyze a single frame for offside using geometric perspective correction.
-    
-    This endpoint uses:
-    1. YOLOv8 for player/ball detection
-    2. K-means clustering for team separation
-    3. Camera calibration and homography for perspective correction
-    4. Geometric calculations in real-world pitch coordinates
-    
-    Use attacking_team to manually specify which team is attacking.
-    """
-    # Validate input
-    contents = await image_file.read()
-    if len(contents) > 50 * 1024 * 1024:  # 50MB limit
-        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
-    
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    
-    logger.info(f"[API] goal_direction={goal_direction}, attacking_team={attacking_team}")
-    
-    # Process frame through geometric pipeline
-    result = process_frame_analysis(image, goal_direction, attacking_team=attacking_team)
-    
-    if "error" in result:
-        raise HTTPException(status_code=422, detail=result["error"])
-    
-    structured_data = result["structured_data"]
-    
-    return OffsideResponse(
-        decision=structured_data["decision"],
-        confidence=structured_data["confidence"],
-        attacker_position=Position(**structured_data["attacker_position"]),
-        defender_position=Position(**structured_data["defender_position"]),
-        attacker_foot=Position(**structured_data["attacker_foot"]),
-        defender_foot=Position(**structured_data["defender_foot"]),
-        explanation=f"{structured_data['decision']} - Margin: {structured_data['offside_margin_meters']:.2f}m",
-        annotated_image_url=result["annotated_url"],
-        svg_url=result["svg_url"],
-        calibration_quality=structured_data["calibration_quality"],
-        offside_margin_meters=structured_data["offside_margin_meters"]
-    )
-
-
-@router.post("/generate-visual", response_model=VisualizationResponse)
-async def generate_visual(request: VisualizationRequest):
-    """Generate SVG visualization from structured positions."""
+    """Generate SVG visualization from positions."""
     svg_content = generate_offside_svg(
-        attacker_pos=(request.attacker_position.x, request.attacker_position.y),
-        defender_pos=(request.defender_position.x, request.defender_position.y),
-        ball_pos=(request.ball_position.x, request.ball_position.y) if request.ball_position else None,
-        offside_line_x=request.offside_line_x,
-        decision=request.decision
+        attacker_pos=(attacker_x, attacker_y),
+        defender_pos=(defender_x, defender_y),
+        goalkeeper_pos=(0, 0),
+        ball_pos=(ball_x, ball_y) if ball_x and ball_y else None,
+        offside_line_x=defender_x,
+        decision=decision,
+        attacking_team=attacking_team,
+        goal_direction=goal_direction
     )
     
-    return VisualizationResponse(svg_content=svg_content, explanation=None)
-
-
-@router.post("/analyze-with-calibration", response_model=OffsideResponse)
-async def analyze_with_calibration(
-    image_file: UploadFile = File(...),
-    goal_direction: str = "right",
-    pitch_top_left_x: Optional[float] = None,
-    pitch_top_left_y: Optional[float] = None,
-    pitch_top_right_x: Optional[float] = None,
-    pitch_top_right_y: Optional[float] = None,
-    pitch_bottom_right_x: Optional[float] = None,
-    pitch_bottom_right_y: Optional[float] = None,
-    pitch_bottom_left_x: Optional[float] = None,
-    pitch_bottom_left_y: Optional[float] = None
-):
-    """
-    Analyze offside with manual camera calibration for higher accuracy.
-    
-    Provide the image coordinates of the four pitch corners for precise calibration.
-    """
-    contents = await image_file.read()
-    if len(contents) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
-    
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    if image is None:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    
-    # Check if all calibration points provided
-    calibrator = None
-    if all(v is not None for v in [
-        pitch_top_left_x, pitch_top_left_y,
-        pitch_top_right_x, pitch_top_right_y,
-        pitch_bottom_right_x, pitch_bottom_right_y,
-        pitch_bottom_left_x, pitch_bottom_left_y
-    ]):
-        # Manual calibration with provided points
-        image_points = np.array([
-            [pitch_top_left_x, pitch_top_left_y],
-            [pitch_top_right_x, pitch_top_right_y],
-            [pitch_bottom_right_x, pitch_bottom_right_y],
-            [pitch_bottom_left_x, pitch_bottom_left_y]
-        ], dtype=np.float32)
-        
-        pitch_points = np.array([
-            [0, 0],
-            [105, 0],
-            [105, 68],
-            [0, 68]
-        ], dtype=np.float32)
-        
-        calibrator = create_calibrator(image, (image_points, pitch_points))
-        logger.info("[Calibration] Using manual calibration points")
-    
-    # Process with calibration
-    result = process_frame_analysis(image, goal_direction, calibrator)
-    
-    if "error" in result:
-        raise HTTPException(status_code=422, detail=result["error"])
-    
-    structured_data = result["structured_data"]
-    
-    return OffsideResponse(
-        decision=structured_data["decision"],
-        confidence=structured_data["confidence"],
-        attacker_position=Position(**structured_data["attacker_position"]),
-        defender_position=Position(**structured_data["defender_position"]),
-        attacker_foot=Position(**structured_data["attacker_foot"]),
-        defender_foot=Position(**structured_data["defender_foot"]),
-        explanation=f"{structured_data['decision']} - Margin: {structured_data['offside_margin_meters']:.2f}m",
-        annotated_image_url=result["annotated_url"],
-        svg_url=result["svg_url"],
-        calibration_quality=structured_data["calibration_quality"],
-        offside_margin_meters=structured_data["offside_margin_meters"]
-    )
+    return {"svg_content": svg_content}

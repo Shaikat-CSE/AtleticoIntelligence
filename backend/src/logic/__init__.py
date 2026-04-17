@@ -1,30 +1,16 @@
-from .team_separation import TeamSeparator, separate_teams
+from .team_separation import TeamSeparator, separate_teams, get_team_info, TeamInfo
 from .offside_analyzer import (
-    GeometricOffsideAnalyzer,
+    OffsideAnalyzer,
     OffsideAnalysisResult,
     analyze_offside,
 )
-from .camera_calibration import (
-    CameraCalibrator,
-    CalibrationResult,
-    PerspectiveCorrector,
-    PitchDimensions,
-    create_calibrator
-)
-
-# Keep old name for backward compatibility
-OffsideAnalyzer = GeometricOffsideAnalyzer
 
 __all__ = [
     "TeamSeparator",
     "separate_teams",
-    "GeometricOffsideAnalyzer",
+    "get_team_info",
+    "TeamInfo",
     "OffsideAnalyzer",
     "OffsideAnalysisResult",
     "analyze_offside",
-    "CameraCalibrator",
-    "CalibrationResult",
-    "PerspectiveCorrector",
-    "PitchDimensions",
-    "create_calibrator",
 ]

@@ -20,13 +20,13 @@ logging.basicConfig(
 def create_app() -> FastAPI:
     app = FastAPI(
         title="AtleticoIntelligence - Offside Review System",
-        description="AI-powered soccer incident review system with geometric perspective correction",
-        version="2.0.0"
+        description="AI-powered soccer incident review system with offside detection",
+        version="3.0.0"
     )
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # TODO: Restrict to specific origins in production
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -47,25 +47,29 @@ def create_app() -> FastAPI:
     def root():
         return {
             "name": "AtleticoIntelligence",
-            "version": "2.0.0",
-            "description": "AI-powered offside review system with geometric perspective correction",
+            "version": "3.0.0",
+            "description": "AI-powered offside review system",
+            "user_flow": [
+                "Step 1: POST /api/v1/detect-teams - Upload image to detect team colors",
+                "Step 2: User selects attacking team + direction",
+                "Step 3: POST /api/v1/analyze-offside - Full offside analysis"
+            ],
             "endpoints": {
-                "analyze_frame": "/api/v1/analyze-frame",
-                "analyze_with_calibration": "/api/v1/analyze-with-calibration",
+                "detect_teams": "/api/v1/detect-teams",
+                "analyze_offside": "/api/v1/analyze-offside",
                 "generate_visual": "/api/v1/generate-visual"
             },
             "features": [
                 "YOLOv8 player and ball detection",
                 "K-means team separation by jersey color",
-                "Automatic camera calibration with homography",
-                "Perspective-corrected offside calculation",
-                "Real-world pitch coordinates (meters)"
+                "Goalkeeper detection and handling",
+                "Offside line placement based on attacker/defender positions"
             ]
         }
 
     @app.get("/health")
     def health_check():
-        return {"status": "healthy", "version": "2.0.0"}
+        return {"status": "healthy", "version": "3.0.0"}
 
     return app
 

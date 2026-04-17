@@ -1,3 +1,3 @@
-from .endpoints import router, analyze_frame, generate_visual, analyze_with_calibration
+from .endpoints import router, detect_teams, analyze_offside_endpoint, generate_visual
 
-__all__ = ["router", "analyze_frame", "generate_visual", "analyze_with_calibration"]
+__all__ = ["router", "detect_teams", "analyze_offside_endpoint", "generate_visual"]

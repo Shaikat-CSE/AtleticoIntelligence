@@ -18,7 +18,7 @@ def demo():
     print("\nNOTE: Using geometric perspective correction (LLM removed)")
 
     print("\n[1] Loading YOLOv8 detector...")
-    detector = create_detector("yolov8n.pt", confidence_threshold=0.25)
+    detector = create_detector("uisikdag/yolo-v8-football-players-detection", confidence_threshold=0.25)
     print("    Detector loaded successfully")
 
     image_path = "test_frame.jpg"
@@ -40,6 +40,9 @@ def demo():
         cv2.rectangle(image, (450, 280), (500, 380), (200, 0, 0), -1)  # Defender 1
         cv2.rectangle(image, (500, 320), (550, 420), (200, 0, 0), -1)  # Defender 2 (2nd last)
         cv2.rectangle(image, (550, 300), (600, 400), (200, 0, 0), -1)  # Defender 3 (GK)
+        
+        # Add mock ball near the attacker
+        cv2.circle(image, (320, 405), 12, (255, 255, 255), -1)  # White ball
         
         detection_result = detector.detect(image)
     else:
