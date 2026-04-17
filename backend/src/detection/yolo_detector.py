@@ -184,24 +184,7 @@ class YOLODetector:
         )
 
         if self.ball_model is not None:
-            ball_results = self.ball_model(image, conf=self.ball_confidence_threshold, verbose=False)
-            for result in ball_results:
-                boxes = result.boxes
-                if boxes is None:
-                    continue
-                for box in boxes:
-                    cls_id = int(box.cls[0])
-                    if cls_id == 32:
-                        conf = float(box.conf[0])
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        generic_ball_candidates.append(BoundingBox(
-                            x1=float(x1), y1=float(y1),
-                            x2=float(x2), y2=float(y2),
-                            confidence=conf,
-                            class_id=cls_id,
-                            class_name="ball",
-                            source="generic"
-                        ))
+            generic_ball_candidates = self._detect_generic_ball_candidates(image)
 
         players, goalkeepers = self._rebalance_goalkeeper_overload(players, goalkeepers, w)
 
@@ -240,10 +223,11 @@ class YOLODetector:
             football_ball_candidates + generic_ball_candidates
         )
 
-        valid_ball_candidates = self._get_valid_ball_candidates(football_ball_candidates, players, image)
-        valid_ball_candidates.extend(self._get_valid_ball_candidates(generic_ball_candidates, players, image))
+        ball_context = players + goalkeepers
+        valid_ball_candidates = self._get_valid_ball_candidates(football_ball_candidates, ball_context, image)
+        valid_ball_candidates.extend(self._get_valid_ball_candidates(generic_ball_candidates, ball_context, image))
         valid_ball_candidates = self._deduplicate_ball_candidates(valid_ball_candidates)
-        ball = self._choose_best_ball_candidate(valid_ball_candidates, players)
+        ball = self._choose_best_ball_candidate(valid_ball_candidates, ball_context)
 
         print(
             f"[YOLODetector] Final: {len(players)} players, {len(goalkeepers)} goalkeepers, "
@@ -372,6 +356,84 @@ class YOLODetector:
                     source="generic-person"
                 ))
         return recovered_players
+
+    def _detect_generic_ball_candidates(self, image: np.ndarray) -> List[BoundingBox]:
+        generic_ball_candidates = self._run_generic_ball_pass(
+            image=image,
+            confidence_threshold=self.ball_confidence_threshold,
+            source="generic",
+            upscale_factor=1.0
+        )
+
+        if len(generic_ball_candidates) < 2:
+            rescue_confidence = max(0.005, self.ball_confidence_threshold * 0.5)
+            rescue_candidates = self._run_generic_ball_pass(
+                image=image,
+                confidence_threshold=rescue_confidence,
+                source="generic-upscaled",
+                upscale_factor=1.5
+            )
+            if rescue_candidates:
+                print(f"[YOLODetector] Upscaled ball pass added {len(rescue_candidates)} candidates")
+                generic_ball_candidates.extend(rescue_candidates)
+
+        return generic_ball_candidates
+
+    def _run_generic_ball_pass(
+        self,
+        image: np.ndarray,
+        confidence_threshold: float,
+        source: str,
+        upscale_factor: float
+    ) -> List[BoundingBox]:
+        inference_image = image
+        scale_x = 1.0
+        scale_y = 1.0
+
+        if abs(upscale_factor - 1.0) > 1e-6:
+            resized_width = max(1, int(round(image.shape[1] * upscale_factor)))
+            resized_height = max(1, int(round(image.shape[0] * upscale_factor)))
+            inference_image = cv2.resize(
+                image,
+                (resized_width, resized_height),
+                interpolation=cv2.INTER_CUBIC
+            )
+            scale_x = image.shape[1] / float(resized_width)
+            scale_y = image.shape[0] / float(resized_height)
+
+        inference_size = 1280 if max(inference_image.shape[:2]) >= 960 else 960
+        results = self.ball_model(
+            inference_image,
+            conf=confidence_threshold,
+            classes=[32],
+            imgsz=inference_size,
+            verbose=False
+        )
+
+        candidates = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for box in boxes:
+                cls_id = int(box.cls[0])
+                if cls_id != 32:
+                    continue
+
+                conf = float(box.conf[0])
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                candidates.append(BoundingBox(
+                    x1=float(x1) * scale_x,
+                    y1=float(y1) * scale_y,
+                    x2=float(x2) * scale_x,
+                    y2=float(y2) * scale_y,
+                    confidence=conf,
+                    class_id=cls_id,
+                    class_name="ball",
+                    source=source
+                ))
+
+        return candidates
 
     def _filter_players(
         self,
@@ -691,71 +753,136 @@ class YOLODetector:
     def _get_valid_ball_candidates(
         self,
         candidates: List[BoundingBox],
-        players: List[BoundingBox],
+        participants: List[BoundingBox],
         image: np.ndarray
     ) -> List[BoundingBox]:
         if not candidates:
             return []
-        
-        avg_player_area = np.mean([p.area for p in players]) if players else 10000
-        player_avg_height = np.mean([p.height for p in players]) if players else 100
-        
+
+        image_height, image_width = image.shape[:2]
+        image_area = float(image_height * image_width)
+        participant_areas = np.array([p.area for p in participants if p.area > 0], dtype=float)
+        participant_heights = np.array([p.height for p in participants if p.height > 0], dtype=float)
+
+        avg_participant_area = (
+            float(np.mean(participant_areas))
+            if participant_areas.size else max(1600.0, image_area * 0.002)
+        )
+        participant_avg_height = (
+            float(np.mean(participant_heights))
+            if participant_heights.size else max(48.0, image_height * 0.08)
+        )
+
+        min_ball_area = max(10.0, min(28.0, image_area * 0.00002))
+        max_ball_area = max(8000.0, avg_participant_area * 0.22, image_area * 0.01)
+        max_ball_height = max(26.0, participant_avg_height * 0.78, image_height * 0.12)
         filtered = []
-        
+
         for ball in candidates:
             ball_area = ball.area
-            ball_center_x, ball_center_y = ball.center
-            ball_width = ball.x2 - ball.x1
-            ball_height = ball.y2 - ball.y1
-            
-            if ball_area < 30 or ball_area > 8000:
-                print(f"[YOLODetector] Ball filtered by size: area={ball_area:.0f}")
-                continue
-            
-            if ball_height > player_avg_height * 0.5:
-                print(f"[YOLODetector] Ball filtered: ball height ({ball_height:.0f}) > 50% of player height ({player_avg_height:.0f})")
-                continue
-            
-            is_inside_player = False
-            for player in players:
-                if self._point_in_bbox(ball_center_x, ball_center_y, player):
-                    is_inside_player = True
-                    print(f"[YOLODetector] Ball filtered: inside player")
-                    break
-            
-            if is_inside_player:
-                continue
-            
-            min_center_dist = float('inf')
-            for player in players:
-                dist = self._distance(ball_center_x, ball_center_y, player.center)
-                min_center_dist = min(min_center_dist, dist)
-            
-            min_foot_dist = float('inf')
-            for player in players:
-                dist = self._distance(ball_center_x, ball_center_y, player.foot_position)
-                min_foot_dist = min(min_foot_dist, dist)
+            ball_width = max(ball.width, 1.0)
+            ball_height = max(ball.height, 1.0)
+            square_ratio = min(ball_width, ball_height) / max(ball_width, ball_height)
+            source = ball.source or ""
+            trusted_football = source == "football" and ball.confidence >= 0.2
+            trusted_generic = source.startswith("generic") and ball.confidence >= 0.08
+            trusted_ball = trusted_football or trusted_generic
 
-            if players:
-                max_foot_dist = max(ball_width * 10, player_avg_height * 0.7)
-                if min_foot_dist > max_foot_dist:
+            if ball_area < min_ball_area:
+                if trusted_ball and square_ratio >= 0.45 and ball_area >= min_ball_area * 0.45:
+                    pass
+                else:
+                    print(f"[YOLODetector] Ball filtered by size: area={ball_area:.0f}")
+                    continue
+
+            if ball_area > max_ball_area:
+                if trusted_football and square_ratio >= 0.55 and ball_height <= max_ball_height * 1.15:
+                    pass
+                else:
+                    print(f"[YOLODetector] Ball filtered by size: area={ball_area:.0f}")
+                    continue
+
+            if ball_height > max_ball_height:
+                if trusted_football and ball_height <= max_ball_height * 1.2 and square_ratio >= 0.55:
+                    pass
+                else:
                     print(
-                        f"[YOLODetector] Ball filtered: too far from all player feet "
-                        f"(min_foot_dist={min_foot_dist:.0f}, max={max_foot_dist:.0f})"
+                        f"[YOLODetector] Ball filtered: height too large "
+                        f"(height={ball_height:.0f}, max={max_ball_height:.0f})"
                     )
                     continue
 
-            if min_center_dist > ball_width * 8:
-                print(f"[YOLODetector] Ball filtered: too far from all players (min_center_dist={min_center_dist:.0f})")
+            if square_ratio < 0.4 and ball.confidence < 0.2:
+                print(f"[YOLODetector] Ball filtered by size: area={ball_area:.0f}")
                 continue
 
-            if self._looks_like_field_mark(ball, image, min_foot_dist, player_avg_height):
-                print("[YOLODetector] Ball filtered: candidate looks like a field mark")
+            is_inside_upper_body = False
+            for participant in participants:
+                if self._ball_center_inside_upper_body(ball, participant):
+                    is_inside_upper_body = True
+                    print(f"[YOLODetector] Ball filtered: deep inside participant body")
+                    break
+
+            if is_inside_upper_body:
                 continue
-            
+
+            min_center_dist, min_foot_dist = self._ball_proximity(ball, participants)
+
+            if participants:
+                max_foot_dist = max(ball_width * 14.0, participant_avg_height * 1.05, 38.0)
+                relaxed_foot_dist = max(ball_width * 20.0, participant_avg_height * 1.4, 62.0)
+                max_center_dist = max(ball_width * 18.0, participant_avg_height * 1.55, 68.0)
+
+                if min_foot_dist > max_foot_dist:
+                    if not (trusted_ball and min_foot_dist <= relaxed_foot_dist and min_center_dist <= max_center_dist):
+                        print(
+                            f"[YOLODetector] Ball filtered: too far from all participant feet "
+                            f"(min_foot_dist={min_foot_dist:.0f}, max={max_foot_dist:.0f})"
+                        )
+                        continue
+
+                if min_center_dist > max_center_dist and min_foot_dist > relaxed_foot_dist:
+                    print(
+                        f"[YOLODetector] Ball filtered: too far from all participants "
+                        f"(min_center_dist={min_center_dist:.0f}, max={max_center_dist:.0f})"
+                    )
+                    continue
+
+            if self._looks_like_field_mark(ball, image, min_foot_dist, participant_avg_height):
+                if not trusted_football:
+                    print("[YOLODetector] Ball filtered: candidate looks like a field mark")
+                    continue
+
             filtered.append(ball)
 
         if not filtered:
+            fallback_candidates = []
+            for ball in candidates:
+                ball_width = max(ball.width, 1.0)
+                ball_height = max(ball.height, 1.0)
+                ball_area = ball.area
+                square_ratio = min(ball_width, ball_height) / max(ball_width, ball_height)
+
+                if ball_area < min_ball_area * 0.45 or ball_area > max_ball_area * 1.35:
+                    continue
+
+                if ball_height > max_ball_height * 1.25:
+                    continue
+
+                if square_ratio < 0.4 and ball.confidence < 0.2:
+                    continue
+
+                if any(self._ball_center_inside_upper_body(ball, participant) for participant in participants):
+                    continue
+
+                fallback_candidates.append(ball)
+
+            if fallback_candidates:
+                print(
+                    f"[YOLODetector] Falling back to {len(fallback_candidates)} loosely validated ball candidates"
+                )
+                return fallback_candidates
+
             print(f"[YOLODetector] No valid ball candidates")
             return []
 
@@ -780,23 +907,32 @@ class YOLODetector:
     def _ball_candidate_score(self, ball: BoundingBox, players: List[BoundingBox]) -> float:
         score = ball.confidence
 
-        if ball.source == "football":
+        source = ball.source or ""
+        if source == "football":
+            score += 0.04
+        elif source.startswith("generic"):
             score += 0.02
-        elif ball.source == "generic":
-            score += 0.01
 
         if ball.width > 0 and ball.height > 0:
             square_ratio = min(ball.width, ball.height) / max(ball.width, ball.height)
-            score += square_ratio * 0.05
+            score += square_ratio * 0.08
 
         if players:
             player_avg_height = np.mean([p.height for p in players]) if players else 100
-            min_foot_dist = min(
-                self._distance(ball.center[0], ball.center[1], player.foot_position)
-                for player in players
-            )
+            min_center_dist, min_foot_dist = self._ball_proximity(ball, players)
             if player_avg_height > 0:
-                score -= min(min_foot_dist / player_avg_height, 1.5) * 0.05
+                close_contact_range = max(ball.width * 7.0, player_avg_height * 0.3, 18.0)
+                if min_foot_dist <= close_contact_range:
+                    score += 0.05
+
+                score -= min(min_foot_dist / player_avg_height, 2.0) * 0.05
+                score -= min(min_center_dist / player_avg_height, 2.0) * 0.03
+
+                if ball.height > player_avg_height * 0.85:
+                    score -= 0.08
+
+        if ball.area < 18 and ball.confidence < 0.08:
+            score -= 0.06
 
         return score
 
@@ -852,6 +988,40 @@ class YOLODetector:
                 return True
 
         return False
+
+    def _ball_center_inside_upper_body(
+        self,
+        ball: BoundingBox,
+        participant: BoundingBox,
+        lower_body_ratio: float = 0.72
+    ) -> bool:
+        ball_center_x, ball_center_y = ball.center
+        if not self._point_in_bbox(ball_center_x, ball_center_y, participant):
+            return False
+
+        lower_body_start = participant.y1 + participant.height * lower_body_ratio
+        return ball_center_y < lower_body_start
+
+    def _ball_proximity(
+        self,
+        ball: BoundingBox,
+        participants: List[BoundingBox]
+    ) -> Tuple[float, float]:
+        if not participants:
+            return float("inf"), float("inf")
+
+        ball_center_x, ball_center_y = ball.center
+        ball_foot_x, ball_foot_y = ball.foot_position
+
+        min_center_dist = min(
+            self._distance(ball_center_x, ball_center_y, participant.center)
+            for participant in participants
+        )
+        min_foot_dist = min(
+            self._distance(ball_foot_x, ball_foot_y, participant.foot_position)
+            for participant in participants
+        )
+        return min_center_dist, min_foot_dist
 
     def _point_in_bbox(self, x: float, y: float, bbox: BoundingBox) -> bool:
         return bbox.x1 <= x <= bbox.x2 and bbox.y1 <= y <= bbox.y2

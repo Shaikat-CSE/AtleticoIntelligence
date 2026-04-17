@@ -27,7 +27,44 @@ export default function VideoPlayer({ onAnalysisComplete }) {
   const getTeamColorLabel = (teamId) => {
     const team = teamColors[teamId]
     if (!team) return `Team ${teamId.replace('team', '')}`
-    return `${team.color_name} (${team.player_count} players)`
+    const prefix = isApproximateColor(team) ? 'Approx. ' : ''
+    return `${prefix}${team.color_name} (${team.player_count} players)`
+  }
+
+  const getColorConfidenceLabel = (confidence) => {
+    if (confidence == null) return 'Confidence unavailable'
+    if (confidence >= 0.78) return 'High confidence'
+    if (confidence >= 0.58) return 'Medium confidence'
+    return 'Low confidence'
+  }
+
+  const getColorConfidenceClass = (confidence) => {
+    if (confidence == null) return 'text-gray-400'
+    if (confidence >= 0.78) return 'text-green-400'
+    if (confidence >= 0.58) return 'text-yellow-300'
+    return 'text-amber-300'
+  }
+
+  const isApproximateColor = (entity) => {
+    if (!entity) return false
+    return Boolean(entity.color_warning) || (entity.color_confidence ?? 1) < 0.58
+  }
+
+  const getTeamColorWarnings = () => {
+    const warnings = []
+
+    ;['team1', 'team2'].forEach((teamId) => {
+      const team = teamColors[teamId]
+      if (team?.color_warning) {
+        warnings.push(`${getTeamColorLabel(teamId)}: ${team.color_warning}`)
+      }
+    })
+
+    if (goalkeeper?.color_warning) {
+      warnings.push(`Goalkeeper: ${goalkeeper.color_warning}`)
+    }
+
+    return warnings
   }
 
   const getDefendingTeamId = () => (attackingTeam === 'team1' ? 'team2' : 'team1')
@@ -241,7 +278,9 @@ export default function VideoPlayer({ onAnalysisComplete }) {
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-lg font-bold">Uploaded Image</h3>
             {analysisStep === 'select' && (
-              <span className="text-green-400 text-sm">Teams Detected</span>
+              <span className={`text-sm ${getTeamColorWarnings().length ? 'text-amber-300' : 'text-green-400'}`}>
+                {getTeamColorWarnings().length ? 'Teams Detected (Approximate Colors)' : 'Teams Detected'}
+              </span>
             )}
           </div>
           <img
@@ -304,19 +343,62 @@ export default function VideoPlayer({ onAnalysisComplete }) {
                     </div>
                   </label>
                 </div>
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {['team1', 'team2'].map((teamId) => {
+                    const team = teamColors[teamId]
+                    if (!team) return null
+
+                    return (
+                      <div key={teamId} className="rounded-lg border border-gray-700 bg-gray-900/60 p-2 text-xs">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-300">{team.color_name}</span>
+                          <span className={getColorConfidenceClass(team.color_confidence)}>
+                            {getColorConfidenceLabel(team.color_confidence)}
+                            {team.color_confidence != null ? ` (${Math.round(team.color_confidence * 100)}%)` : ''}
+                          </span>
+                        </div>
+                        <p className={`mt-1 ${team.color_warning ? 'text-amber-300' : 'text-gray-500'}`}>
+                          {team.color_warning || 'Stable team color cluster'}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
+
+              {getTeamColorWarnings().length > 0 && (
+                <div className="mb-4 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10">
+                  <label className="block text-sm text-amber-200 mb-2">Color Detection Notes</label>
+                  <div className="space-y-1 text-sm text-amber-100">
+                    {getTeamColorWarnings().map((warning, index) => (
+                      <p key={index}>{warning}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {goalkeeper && (
                 <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-orange-500">
                   <label className="block text-sm text-gray-400 mb-2">{getGoalkeeperTitle()}</label>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-5 h-5 rounded-full border-2 border-orange-400"
-                      style={getTeamColorStyle(goalkeeper.color_bgr)}
-                    />
-                    <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
-                    <span className="text-gray-500">|</span>
-                    <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-5 h-5 rounded-full border-2 border-orange-400"
+                        style={getTeamColorStyle(goalkeeper.color_bgr)}
+                      />
+                      <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
+                      <span className="text-gray-500">|</span>
+                      <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                    </div>
+                    <div className="text-sm">
+                      <span className={getColorConfidenceClass(goalkeeper.color_confidence)}>
+                        {getColorConfidenceLabel(goalkeeper.color_confidence)}
+                        {goalkeeper.color_confidence != null ? ` (${Math.round(goalkeeper.color_confidence * 100)}%)` : ''}
+                      </span>
+                      {goalkeeper.color_warning && (
+                        <p className="mt-1 text-amber-300">{goalkeeper.color_warning}</p>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -448,19 +530,62 @@ export default function VideoPlayer({ onAnalysisComplete }) {
                     </div>
                   </label>
                 </div>
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {['team1', 'team2'].map((teamId) => {
+                    const team = teamColors[teamId]
+                    if (!team) return null
+
+                    return (
+                      <div key={teamId} className="rounded-lg border border-gray-700 bg-gray-900/60 p-2 text-xs">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-gray-300">{team.color_name}</span>
+                          <span className={getColorConfidenceClass(team.color_confidence)}>
+                            {getColorConfidenceLabel(team.color_confidence)}
+                            {team.color_confidence != null ? ` (${Math.round(team.color_confidence * 100)}%)` : ''}
+                          </span>
+                        </div>
+                        <p className={`mt-1 ${team.color_warning ? 'text-amber-300' : 'text-gray-500'}`}>
+                          {team.color_warning || 'Stable team color cluster'}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
+
+              {getTeamColorWarnings().length > 0 && (
+                <div className="mb-4 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10">
+                  <label className="block text-sm text-amber-200 mb-2">Color Detection Notes</label>
+                  <div className="space-y-1 text-sm text-amber-100">
+                    {getTeamColorWarnings().map((warning, index) => (
+                      <p key={index}>{warning}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {goalkeeper && (
                 <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-orange-500">
                   <label className="block text-sm text-gray-400 mb-2">{getGoalkeeperTitle()}</label>
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-5 h-5 rounded-full border-2 border-orange-400"
-                      style={getTeamColorStyle(goalkeeper.color_bgr)}
-                    />
-                    <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
-                    <span className="text-gray-500">|</span>
-                    <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-5 h-5 rounded-full border-2 border-orange-400"
+                        style={getTeamColorStyle(goalkeeper.color_bgr)}
+                      />
+                      <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
+                      <span className="text-gray-500">|</span>
+                      <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                    </div>
+                    <div className="text-sm">
+                      <span className={getColorConfidenceClass(goalkeeper.color_confidence)}>
+                        {getColorConfidenceLabel(goalkeeper.color_confidence)}
+                        {goalkeeper.color_confidence != null ? ` (${Math.round(goalkeeper.color_confidence * 100)}%)` : ''}
+                      </span>
+                      {goalkeeper.color_warning && (
+                        <p className="mt-1 text-amber-300">{goalkeeper.color_warning}</p>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

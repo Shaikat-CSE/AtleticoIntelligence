@@ -9,7 +9,10 @@ import logging
 
 from ..detection import create_detector, BoundingBox
 from ..logic import separate_teams, analyze_offside, TeamInfo
-from ..utils import get_color_name_from_bgr, extract_jersey_color_bgr
+from ..utils import (
+    extract_team_color_profile,
+    extract_jersey_color_profile,
+)
 from ..visualization import annotate_frame, generate_offside_svg
 
 router = APIRouter()
@@ -32,12 +35,16 @@ class TeamInfoResponse(BaseModel):
     color_name: str
     color_bgr: tuple
     player_count: int
+    color_confidence: Optional[float] = None
+    color_warning: Optional[str] = None
 
 
 class GoalkeeperInfo(BaseModel):
     position: Position
     color_name: str
     color_bgr: tuple
+    color_confidence: Optional[float] = None
+    color_warning: Optional[str] = None
     team: Optional[str] = None
     source: Optional[str] = None
 
@@ -80,34 +87,25 @@ class DetectorState:
 
 detector_state = DetectorState()
 
-
-def _extract_jersey_color(player_bbox, image: np.ndarray) -> np.ndarray:
-    return extract_jersey_color_bgr(player_bbox, image)
-
-
 def _compute_team_info_from_players(players: List[BoundingBox], image: np.ndarray):
     if not players:
         return None
-    
-    team_color = np.mean([_extract_jersey_color(p, image) for p in players], axis=0)
-    team_color_tuple = tuple(int(c) for c in team_color)
-    
-    color_name = _get_color_name_from_bgr(team_color_tuple)
-    
-    print(f"[_compute_team_info] players={len(players)}, color_bgr={team_color_tuple}, color_name={color_name}")
-    
-    return TeamInfo(
-        players=list(players),
-        color_bgr=team_color_tuple,
-        color_name=color_name,
-        goalkeeper=None
+
+    team_profile = extract_team_color_profile(players, image)
+
+    print(
+        f"[_compute_team_info] players={len(players)}, color_bgr={team_profile.color_bgr}, "
+        f"color_name={team_profile.color_name}, confidence={team_profile.confidence:.2f}"
     )
 
-
-def _get_color_name_from_bgr(bgr: Tuple[int, int, int]) -> str:
-    return get_color_name_from_bgr(bgr)
-
-
+    return TeamInfo(
+        players=list(players),
+        color_bgr=team_profile.color_bgr,
+        color_name=team_profile.color_name,
+        goalkeeper=None,
+        color_confidence=team_profile.confidence,
+        color_warning=team_profile.warning
+    )
 def _find_extreme_player(
     team_players: List[BoundingBox],
     goal_direction: str,
@@ -224,22 +222,55 @@ def _select_ball_for_selected_attack(
     attacking_players: List[BoundingBox],
     defending_goalkeeper: Optional[BoundingBox]
 ) -> Optional[BoundingBox]:
-    if not ball_candidates or not attacking_players:
+    if not ball_candidates:
         return None
 
+    if not attacking_players:
+        best_ball = max(ball_candidates, key=lambda ball: ball.confidence)
+        logger.info(
+            f"[Ball] No attacking players available; using highest-confidence candidate "
+            f"(source={best_ball.source or 'unknown'}, conf={best_ball.confidence:.2f})"
+        )
+        return best_ball
+
     ranked_candidates = []
+    soft_ranked_candidates = []
 
     for ball in ball_candidates:
+        ball_anchor = np.array(ball.foot_position)
         closest_attacker = min(
             attacking_players,
-            key=lambda player: np.linalg.norm(np.array(ball.center) - np.array(player.foot_position))
+            key=lambda player: np.linalg.norm(ball_anchor - np.array(player.foot_position))
         )
-        attacker_dist = np.linalg.norm(np.array(ball.center) - np.array(closest_attacker.foot_position))
-        horizontal_gap = abs(ball.center[0] - closest_attacker.foot_position[0])
-        vertical_gap = abs(ball.center[1] - closest_attacker.foot_position[1])
+        attacker_dist = np.linalg.norm(ball_anchor - np.array(closest_attacker.foot_position))
+        horizontal_gap = abs(ball.foot_position[0] - closest_attacker.foot_position[0])
+        vertical_gap = abs(ball.foot_position[1] - closest_attacker.foot_position[1])
         attacker_height = max(closest_attacker.height, 1.0)
+        square_ratio = min(ball.width, ball.height) / max(ball.width, ball.height, 1.0)
+        source = ball.source or ""
 
-        max_attacker_dist = max(attacker_height * 0.6, ball.width * 10, 28)
+        soft_score = ball.confidence
+        if source == "football":
+            soft_score += 0.04
+        elif source.startswith("generic"):
+            soft_score += 0.025
+        soft_score += square_ratio * 0.05
+        if attacker_dist <= max(attacker_height * 0.28, ball.width * 6, 14):
+            soft_score += 0.05
+
+        goalkeeper_dist = None
+        if defending_goalkeeper is not None:
+            goalkeeper_dist = np.linalg.norm(ball_anchor - np.array(defending_goalkeeper.foot_position))
+
+        soft_score -= min(attacker_dist / attacker_height, 2.0) * 0.06
+        soft_score -= min(vertical_gap / attacker_height, 2.0) * 0.06
+        soft_score -= min(horizontal_gap / attacker_height, 2.0) * 0.03
+        if goalkeeper_dist is not None and attacker_height > 0:
+            soft_score += min(goalkeeper_dist / attacker_height, 2.0) * 0.02
+
+        soft_ranked_candidates.append((soft_score, ball))
+
+        max_attacker_dist = max(attacker_height * 1.15, ball.width * 18, 54)
         if attacker_dist > max_attacker_dist:
             logger.info(
                 f"[Ball] Candidate rejected: too far from attacking player "
@@ -247,7 +278,7 @@ def _select_ball_for_selected_attack(
             )
             continue
 
-        max_vertical_gap = max(attacker_height * 0.45, 22)
+        max_vertical_gap = max(attacker_height * 0.95, 46)
         if vertical_gap > max_vertical_gap:
             logger.info(
                 f"[Ball] Candidate rejected: too far vertically from attacking foot "
@@ -255,39 +286,41 @@ def _select_ball_for_selected_attack(
             )
             continue
 
-        goalkeeper_dist = None
         if defending_goalkeeper is not None:
-            goalkeeper_dist = np.linalg.norm(np.array(ball.center) - np.array(defending_goalkeeper.foot_position))
-            if goalkeeper_dist + max(15, ball.width * 3) < attacker_dist:
+            goalkeeper_margin = max(20, ball.width * 2.5)
+            if goalkeeper_dist + goalkeeper_margin < attacker_dist and attacker_dist > max(attacker_height * 0.45, 24):
                 logger.info(
                     f"[Ball] Candidate rejected: closer to defending goalkeeper than attacker "
                     f"(gk_dist={goalkeeper_dist:.1f}, attacker_dist={attacker_dist:.1f}, source={ball.source or 'unknown'})"
                 )
                 continue
 
-        score = ball.confidence
-        if ball.source == "football":
+        score = soft_score
+        if attacker_dist <= max(attacker_height * 0.75, ball.width * 12, 32):
+            score += 0.05
+        if vertical_gap <= max(attacker_height * 0.55, 28):
             score += 0.03
-        elif ball.source == "generic":
-            score += 0.01
-        score -= min(attacker_dist / attacker_height, 1.5) * 0.08
-        score -= min(vertical_gap / attacker_height, 1.5) * 0.10
-        score -= min(horizontal_gap / attacker_height, 1.5) * 0.04
-        if goalkeeper_dist is not None and attacker_height > 0:
-            score += min(goalkeeper_dist / attacker_height, 1.5) * 0.03
 
         ranked_candidates.append((score, ball))
 
-    if not ranked_candidates:
-        logger.info("[Ball] No team-aware ball candidate survived final validation")
-        return None
+    if ranked_candidates:
+        best_score, best_ball = max(ranked_candidates, key=lambda item: item[0])
+        logger.info(
+            f"[Ball] Selected team-aware candidate: source={best_ball.source or 'unknown'}, "
+            f"conf={best_ball.confidence:.2f}, score={best_score:.2f}"
+        )
+        return best_ball
 
-    best_score, best_ball = max(ranked_candidates, key=lambda item: item[0])
-    logger.info(
-        f"[Ball] Selected team-aware candidate: source={best_ball.source or 'unknown'}, "
-        f"conf={best_ball.confidence:.2f}, score={best_score:.2f}"
-    )
-    return best_ball
+    if soft_ranked_candidates:
+        best_score, best_ball = max(soft_ranked_candidates, key=lambda item: item[0])
+        logger.info(
+            f"[Ball] Falling back to soft-ranked candidate: source={best_ball.source or 'unknown'}, "
+            f"conf={best_ball.confidence:.2f}, score={best_score:.2f}"
+        )
+        return best_ball
+
+    logger.info("[Ball] No team-aware ball candidate survived final validation")
+    return None
 
 
 def _validate_ball_for_selected_attack(
@@ -346,8 +379,14 @@ async def detect_teams(image_file: UploadFile = File(...)):
     if team1_info is None or team2_info is None:
         raise HTTPException(status_code=422, detail="Could not compute team colors")
     
-    logger.info(f"[Team Detection] Team 1 (left): {len(team1)} players, color={team1_info.color_name} RGB{team1_info.color_bgr}")
-    logger.info(f"[Team Detection] Team 2 (right): {len(team2)} players, color={team2_info.color_name} RGB{team2_info.color_bgr}")
+    logger.info(
+        f"[Team Detection] Team 1 (left): {len(team1)} players, color={team1_info.color_name} "
+        f"RGB{team1_info.color_bgr}, confidence={team1_info.color_confidence:.2f}"
+    )
+    logger.info(
+        f"[Team Detection] Team 2 (right): {len(team2)} players, color={team2_info.color_name} "
+        f"RGB{team2_info.color_bgr}, confidence={team2_info.color_confidence:.2f}"
+    )
     
     goalkeeper_info = None
     if detected_goalkeeper:
@@ -355,28 +394,26 @@ async def detect_teams(image_file: UploadFile = File(...)):
             f"[Team Detection] Singleton third-color player isolated from team colors: "
             f"foot_pos={detected_goalkeeper.foot_position}"
         )
-        gk_color = _extract_jersey_color(detected_goalkeeper, image)
-        gk_color_tuple = tuple(int(c) for c in gk_color)
-        gk_color_name = _get_color_name_from_bgr(gk_color_tuple)
+        gk_profile = extract_jersey_color_profile(detected_goalkeeper, image)
         logger.info(
-            f"[Team Detection] Third-color singleton: {gk_color_name} RGB{gk_color_tuple}, "
+            f"[Team Detection] Third-color singleton: {gk_profile.color_name} RGB{gk_profile.color_bgr}, "
             f"excluded from both team color palettes"
         )
         
         goalkeeper_info = GoalkeeperInfo(
             position=Position(x=float(detected_goalkeeper.foot_position[0]), y=float(detected_goalkeeper.foot_position[1])),
-            color_name=gk_color_name,
-            color_bgr=gk_color_tuple,
+            color_name=gk_profile.color_name,
+            color_bgr=gk_profile.color_bgr,
+            color_confidence=gk_profile.confidence,
+            color_warning=gk_profile.warning,
             team=None,
             source=detected_goalkeeper.source or "third-color-singleton"
         )
     elif len(detection_result.goalkeepers) == 1:
         detected_yolo_goalkeeper = detection_result.goalkeepers[0]
-        gk_color = _extract_jersey_color(detected_yolo_goalkeeper, image)
-        gk_color_tuple = tuple(int(c) for c in gk_color)
-        gk_color_name = _get_color_name_from_bgr(gk_color_tuple)
+        gk_profile = extract_jersey_color_profile(detected_yolo_goalkeeper, image)
         logger.info(
-            f"[Team Detection] Detector goalkeeper candidate: {gk_color_name} RGB{gk_color_tuple}, "
+            f"[Team Detection] Detector goalkeeper candidate: {gk_profile.color_name} RGB{gk_profile.color_bgr}, "
             f"source={detected_yolo_goalkeeper.source or 'yolo'}"
         )
 
@@ -385,8 +422,10 @@ async def detect_teams(image_file: UploadFile = File(...)):
                 x=float(detected_yolo_goalkeeper.foot_position[0]),
                 y=float(detected_yolo_goalkeeper.foot_position[1])
             ),
-            color_name=gk_color_name,
-            color_bgr=gk_color_tuple,
+            color_name=gk_profile.color_name,
+            color_bgr=gk_profile.color_bgr,
+            color_confidence=gk_profile.confidence,
+            color_warning=gk_profile.warning,
             team=None,
             source=detected_yolo_goalkeeper.source or "yolo"
         )
@@ -401,13 +440,17 @@ async def detect_teams(image_file: UploadFile = File(...)):
             team_id="team1",
             color_name=str(team1_info.color_name),
             color_bgr=convert_color(team1_info.color_bgr),
-            player_count=int(len(team1_info.players))
+            player_count=int(len(team1_info.players)),
+            color_confidence=float(team1_info.color_confidence) if team1_info.color_confidence is not None else None,
+            color_warning=team1_info.color_warning
         ),
         team2_info=TeamInfoResponse(
             team_id="team2",
             color_name=str(team2_info.color_name),
             color_bgr=convert_color(team2_info.color_bgr),
-            player_count=int(len(team2_info.players))
+            player_count=int(len(team2_info.players)),
+            color_confidence=float(team2_info.color_confidence) if team2_info.color_confidence is not None else None,
+            color_warning=team2_info.color_warning
         ),
         goalkeeper=goalkeeper_info,
         player_count=int(len(detection_result.players)),
@@ -480,9 +523,15 @@ async def analyze_offside_endpoint(
         raise HTTPException(status_code=422, detail="Could not separate teams")
     
     if team1_info:
-        logger.info(f"[Teams] Team1 color: {team1_info.color_name} RGB{team1_info.color_bgr}")
+        logger.info(
+            f"[Teams] Team1 color: {team1_info.color_name} RGB{team1_info.color_bgr}, "
+            f"confidence={team1_info.color_confidence:.2f}"
+        )
     if team2_info:
-        logger.info(f"[Teams] Team2 color: {team2_info.color_name} RGB{team2_info.color_bgr}")
+        logger.info(
+            f"[Teams] Team2 color: {team2_info.color_name} RGB{team2_info.color_bgr}, "
+            f"confidence={team2_info.color_confidence:.2f}"
+        )
     
     team1_goalkeeper = None
     team2_goalkeeper = None
@@ -715,13 +764,17 @@ async def analyze_offside_endpoint(
             "team_id": "team1",
             "color_name": str(team1_info.color_name) if team1_info else "Unknown",
             "color_bgr": convert_color(team1_info.color_bgr) if team1_info else (0, 0, 0),
-            "player_count": int(len(team1))
+            "player_count": int(len(team1)),
+            "color_confidence": safe_float(team1_info.color_confidence) if team1_info else None,
+            "color_warning": team1_info.color_warning if team1_info else None
         } if team1_info else None,
         "team2_info": {
             "team_id": "team2",
             "color_name": str(team2_info.color_name) if team2_info else "Unknown",
             "color_bgr": convert_color(team2_info.color_bgr) if team2_info else (0, 0, 0),
-            "player_count": int(len(team2))
+            "player_count": int(len(team2)),
+            "color_confidence": safe_float(team2_info.color_confidence) if team2_info else None,
+            "color_warning": team2_info.color_warning if team2_info else None
         } if team2_info else None
     }
     

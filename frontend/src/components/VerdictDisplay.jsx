@@ -4,6 +4,19 @@ export default function VerdictDisplay({ result, onClose }) {
   const isOffside = result.decision === 'OFFSIDE'
   const attackingTeamInfo = result[`${result.attacking_team}_info`]
   const defendingTeamInfo = result[`${result.defending_team}_info`]
+  const isApproximateColor = (teamInfo) => (
+    Boolean(teamInfo?.color_warning) || (teamInfo?.color_confidence ?? 1) < 0.58
+  )
+  const getTeamLabel = (teamInfo, fallback) => {
+    if (!teamInfo) return fallback
+    return `${isApproximateColor(teamInfo) ? 'Approx. ' : ''}${teamInfo.color_name}`
+  }
+  const getConfidenceLabel = (confidence) => {
+    if (confidence == null) return null
+    if (confidence >= 0.78) return 'High confidence'
+    if (confidence >= 0.58) return 'Medium confidence'
+    return 'Low confidence'
+  }
   
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
@@ -63,15 +76,27 @@ export default function VerdictDisplay({ result, onClose }) {
         <div className="grid grid-cols-2 gap-4 mb-6">
           <div className="bg-gray-800 rounded-lg p-4">
             <p className="text-gray-400 text-sm mb-1">Attacking Side</p>
-            <p className="font-semibold">
-              {attackingTeamInfo?.color_name || result.attacking_team}
-            </p>
+            <p className="font-semibold">{getTeamLabel(attackingTeamInfo, result.attacking_team)}</p>
+            {attackingTeamInfo?.color_confidence != null && (
+              <p className="text-xs text-gray-400 mt-1">
+                {getConfidenceLabel(attackingTeamInfo.color_confidence)} ({(attackingTeamInfo.color_confidence * 100).toFixed(0)}%)
+              </p>
+            )}
+            {attackingTeamInfo?.color_warning && (
+              <p className="text-xs text-amber-300 mt-1">{attackingTeamInfo.color_warning}</p>
+            )}
           </div>
           <div className="bg-gray-800 rounded-lg p-4">
             <p className="text-gray-400 text-sm mb-1">Defending Side</p>
-            <p className="font-semibold">
-              {defendingTeamInfo?.color_name || result.defending_team}
-            </p>
+            <p className="font-semibold">{getTeamLabel(defendingTeamInfo, result.defending_team)}</p>
+            {defendingTeamInfo?.color_confidence != null && (
+              <p className="text-xs text-gray-400 mt-1">
+                {getConfidenceLabel(defendingTeamInfo.color_confidence)} ({(defendingTeamInfo.color_confidence * 100).toFixed(0)}%)
+              </p>
+            )}
+            {defendingTeamInfo?.color_warning && (
+              <p className="text-xs text-amber-300 mt-1">{defendingTeamInfo.color_warning}</p>
+            )}
           </div>
         </div>
 
