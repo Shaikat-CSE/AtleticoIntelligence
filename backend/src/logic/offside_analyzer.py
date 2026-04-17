@@ -32,7 +32,9 @@ class OffsideAnalyzer:
         attacking_team_input: Optional[str],
         team1_info,
         team2_info,
-        goal_direction: str = "right"
+        goal_direction: str = "right",
+        team1_goalkeeper: Optional[BoundingBox] = None,
+        team2_goalkeeper: Optional[BoundingBox] = None
     ) -> OffsideAnalysisResult:
         if not team1 or not team2:
             logger.warning("Insufficient players for offside analysis")
@@ -57,7 +59,14 @@ class OffsideAnalyzer:
 
         logger.info(f"Attacking team: {attacking_team}, Defending team: {defending_team}")
 
-        goalkeeper = self._find_goalkeeper(defending_list, goal_direction)
+        if attacking_team == "team1":
+            attacking_goalkeeper = team1_goalkeeper
+            defending_goalkeeper = team2_goalkeeper
+        else:
+            attacking_goalkeeper = team2_goalkeeper
+            defending_goalkeeper = team1_goalkeeper
+        
+        goalkeeper = defending_goalkeeper
         field_defenders = [d for d in defending_list if d != goalkeeper]
         
         if not field_defenders and goalkeeper:
@@ -71,7 +80,10 @@ class OffsideAnalyzer:
         logger.info(f"Goalkeeper: {goalkeeper.foot_position if goalkeeper else 'None'}")
         logger.info(f"Second-last defender: {second_last_defender.foot_position if second_last_defender else 'None'}")
 
-        attacker = self._find_attacker(attacking_list, ball_position, goalkeeper)
+        attacker = self._find_attacker(attacking_list, ball_position, attacking_goalkeeper, goal_direction)
+        if attacker is None:
+            logger.warning("No reliable attacker found")
+            return self._create_unknown_result(None, goalkeeper, attacking_team, defending_team)
         
         if second_last_defender is None:
             logger.warning("No second-last defender found")
@@ -131,31 +143,26 @@ class OffsideAnalyzer:
         self,
         attacking_list: List[BoundingBox],
         ball_position: Optional[Tuple[float, float]],
-        goalkeeper: Optional[BoundingBox]
+        goalkeeper: Optional[BoundingBox],
+        goal_direction: str = "right"
     ) -> BoundingBox:
+        if not attacking_list:
+            return None
+            
+        field_attackers = [p for p in attacking_list if p != goalkeeper]
+        
         if ball_position is None:
-            logger.warning("No ball position - using first attacker")
-            return attacking_list[0]
+            logger.warning("No ball position - attacker cannot be determined reliably")
+            return None
+
+        if not field_attackers:
+            logger.warning("No outfield attackers available after goalkeeper exclusion")
+            return None
 
         temp_attacker = min(
-            attacking_list,
+            field_attackers,
             key=lambda p: np.linalg.norm(np.array(p.foot_position) - np.array(ball_position))
         )
-        
-        is_behind_gk = False
-        if goalkeeper is not None:
-            gk_x = goalkeeper.foot_position[0]
-            if self._is_behind_goalkeeper(temp_attacker, gk_x, len(attacking_list) > 1):
-                logger.warning("Attacker behind goalkeeper - using fallback to first field player")
-                is_behind_gk = True
-
-        if temp_attacker == goalkeeper or is_behind_gk:
-            field_attackers = [p for p in attacking_list if p != goalkeeper]
-            if field_attackers:
-                return field_attackers[0]
-            if attacking_list:
-                return attacking_list[0]
-            return temp_attacker
 
         logger.info(f"Attacker (ball-touching): foot=({temp_attacker.foot_position[0]:.1f}, {temp_attacker.foot_position[1]:.1f})")
         return temp_attacker
@@ -192,10 +199,13 @@ def analyze_offside(
     attacking_team_input: Optional[str],
     team1_info,
     team2_info,
-    goal_direction: str = "right"
+    goal_direction: str = "right",
+    team1_goalkeeper: Optional[BoundingBox] = None,
+    team2_goalkeeper: Optional[BoundingBox] = None
 ) -> OffsideAnalysisResult:
     analyzer = OffsideAnalyzer()
     return analyzer.analyze(
         team1, team2, ball_position, attacking_team_input,
-        team1_info, team2_info, goal_direction
+        team1_info, team2_info, goal_direction,
+        team1_goalkeeper, team2_goalkeeper
     )

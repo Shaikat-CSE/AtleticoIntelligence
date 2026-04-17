@@ -80,30 +80,20 @@ class SVGPitchGenerator:
                 extra += f'<text x="{cx}" y="{cy - radius - 12}" class="label" style="font-size: 12px; fill: #ffd700;">⚽ BALL</text>'
             return f'{extra}<circle cx="{cx}" cy="{cy}" r="{radius}" class="{team_class}" style="{extra_stroke}" opacity="{opacity}"/>'
 
-        if attacking_team == "team1":
-            attacking_class = "attacker"
-            defending_class = "defender"
-        else:
-            attacking_class = "defender"
-            defending_class = "attacker"
+        team1_class = "attacker" if attacking_team == "team1" else "defender"
+        team2_class = "attacker" if attacking_team == "team2" else "defender"
 
         if team1_positions:
             for i, (px, py) in enumerate(team1_positions):
                 sx, sy = to_svg_coords(px, py)
-                team_class = attacking_class if attacking_team == "team1" else defending_class
-                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team_class}" opacity="0.7"/>')
+                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team1_class}" opacity="0.7"/>')
 
         if team2_positions:
             for i, (px, py) in enumerate(team2_positions):
                 sx, sy = to_svg_coords(px, py)
-                team_class = attacking_class if attacking_team == "team2" else defending_class
-                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team_class}" opacity="0.7"/>')
+                svg.append(f'<circle cx="{sx}" cy="{sy}" r="12" class="{team2_class}" opacity="0.7"/>')
 
-        # Colors based on attacking team
-        if attacking_team == "team1":
-            defender_color = "#3b8bff"  # Blue for team2 (defending)
-        else:
-            defender_color = "#ff3b3b"  # Red for team1 (defending)
+        defender_color = "#3b8bff"
         
         # Only draw attacker if valid position (not 0,0)
         if attacker_pos[0] > 0 and attacker_pos[1] > 0:

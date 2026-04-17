@@ -2,15 +2,9 @@ export default function VerdictDisplay({ result, onClose }) {
   if (!result) return null
 
   const isOffside = result.decision === 'OFFSIDE'
+  const attackingTeamInfo = result[`${result.attacking_team}_info`]
+  const defendingTeamInfo = result[`${result.defending_team}_info`]
   
-  // Calibration quality color
-  const calQualityColors = {
-    good: 'text-green-400',
-    poor: 'text-yellow-400',
-    fallback: 'text-orange-400',
-    failed: 'text-gray-400'
-  }
-
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
       <div className="card max-w-4xl w-full max-h-[90vh] overflow-auto">
@@ -66,18 +60,26 @@ export default function VerdictDisplay({ result, onClose }) {
           </div>
         </div>
 
-        {/* New: Calibration Quality and Margin */}
         <div className="grid grid-cols-2 gap-4 mb-6">
           <div className="bg-gray-800 rounded-lg p-4">
-            <p className="text-gray-400 text-sm mb-1">Calibration Quality</p>
-            <p className={`font-semibold uppercase ${calQualityColors[result.calibration_quality] || 'text-gray-400'}`}>
-              {result.calibration_quality || 'unknown'}
+            <p className="text-gray-400 text-sm mb-1">Attacking Side</p>
+            <p className="font-semibold">
+              {attackingTeamInfo?.color_name || result.attacking_team}
             </p>
           </div>
           <div className="bg-gray-800 rounded-lg p-4">
+            <p className="text-gray-400 text-sm mb-1">Defending Side</p>
+            <p className="font-semibold">
+              {defendingTeamInfo?.color_name || result.defending_team}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 mb-6">
+          <div className="bg-gray-800 rounded-lg p-4">
             <p className="text-gray-400 text-sm mb-1">Offside Margin</p>
             <p className={`font-mono font-semibold ${isOffside ? 'text-red-400' : 'text-green-400'}`}>
-              {result.offside_margin_meters?.toFixed(2) || '0.00'} m
+              {result.offside_margin_pixels?.toFixed(1) || '0.0'} px
             </p>
           </div>
         </div>

@@ -37,6 +37,7 @@ htmlcov/
 *.db
 *.sqlite3
 output/
+backend/output/
 
 # Node / frontend
 node_modules/

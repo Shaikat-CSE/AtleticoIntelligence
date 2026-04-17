@@ -15,6 +15,7 @@ export default function VideoPlayer({ onAnalysisComplete }) {
   const [attackingTeam, setAttackingTeam] = useState('team1')
   const [goalDirection, setGoalDirection] = useState('right')
   const [teamColors, setTeamColors] = useState({ team1: null, team2: null })
+  const [goalkeeper, setGoalkeeper] = useState(null)
   const [analysisStep, setAnalysisStep] = useState('upload')  // 'upload' | 'detect' | 'select'
 
   const getTeamColorStyle = (colorBgr) => {
@@ -29,14 +30,43 @@ export default function VideoPlayer({ onAnalysisComplete }) {
     return `${team.color_name} (${team.player_count} players)`
   }
 
+  const getDefendingTeamId = () => (attackingTeam === 'team1' ? 'team2' : 'team1')
+
+  const isDistinctThirdColorGoalkeeper = () => (goalkeeper?.source || '').startsWith('third-color')
+
+  const getGoalkeeperAssignmentLabel = () => {
+    const defendingTeamId = getDefendingTeamId()
+    const defendingTeam = teamColors[defendingTeamId]
+    if (defendingTeam) {
+      return defendingTeam.color_name
+    }
+    return `Team ${defendingTeamId.replace('team', '')}`
+  }
+
+  const getGoalkeeperTitle = () => {
+    if (isDistinctThirdColorGoalkeeper() || goalkeeper?.source === 'color-cluster') {
+      return 'Third-Color Goalkeeper'
+    }
+    return 'Goalkeeper Detected'
+  }
+
+  const getGoalkeeperDescription = () => {
+    if (isDistinctThirdColorGoalkeeper() || goalkeeper?.source === 'color-cluster') {
+      return `Excluded from team colors; auto-assigned to the defending side: ${getGoalkeeperAssignmentLabel()}`
+    }
+    return `Defending goalkeeper for: ${getGoalkeeperAssignmentLabel()}`
+  }
+
   const handleVideoUpload = (e) => {
     const file = e.target.files[0]
     if (file) {
       const url = URL.createObjectURL(file)
       setVideoUrl(url)
       setUploadedImage(null)
+      setUploadedImageFile(null)
       setAnalysisStep('upload')
       setTeamColors({ team1: null, team2: null })
+      setGoalkeeper(null)
     }
   }
 
@@ -48,6 +78,7 @@ export default function VideoPlayer({ onAnalysisComplete }) {
       setVideoUrl(null)
       setAnalysisStep('upload')
       setTeamColors({ team1: null, team2: null })
+      setGoalkeeper(null)
     }
   }
 
@@ -108,12 +139,13 @@ export default function VideoPlayer({ onAnalysisComplete }) {
           team1: result.team1_info,
           team2: result.team2_info
         })
+        setGoalkeeper(result.goalkeeper || null)
       }
       
       setAnalysisStep('select')
     } catch (error) {
       console.error('Team detection failed:', error)
-      alert('Failed to detect teams. Is the backend running?')
+      alert(error?.response?.data?.detail || 'Failed to detect teams. Is the backend running?')
     }
     setIsAnalyzing(false)
   }
@@ -126,7 +158,7 @@ export default function VideoPlayer({ onAnalysisComplete }) {
       if (onAnalysisComplete) onAnalysisComplete(result)
     } catch (error) {
       console.error('Analysis failed:', error)
-      alert('Failed to analyze image. Is the backend running?')
+      alert(error?.response?.data?.detail || 'Failed to analyze image. Is the backend running?')
     }
     setIsAnalyzing(false)
   }
@@ -151,8 +183,8 @@ export default function VideoPlayer({ onAnalysisComplete }) {
   }
 
   const handleReAnalyzeVideoFrame = async () => {
-    if (!videoRef.current) return
     const frameFile = await captureFrame()
+    if (!frameFile) return
     await performFinalAnalysis(frameFile)
   }
 
@@ -273,6 +305,21 @@ export default function VideoPlayer({ onAnalysisComplete }) {
                   </label>
                 </div>
               </div>
+
+              {goalkeeper && (
+                <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-orange-500">
+                  <label className="block text-sm text-gray-400 mb-2">{getGoalkeeperTitle()}</label>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-5 h-5 rounded-full border-2 border-orange-400"
+                      style={getTeamColorStyle(goalkeeper.color_bgr)}
+                    />
+                    <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
+                    <span className="text-gray-500">|</span>
+                    <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                  </div>
+                </div>
+              )}
 
               <div className="mb-4 p-3 bg-gray-800 rounded-lg">
                 <label className="block text-sm text-gray-400 mb-2">Attack Direction</label>
@@ -402,6 +449,21 @@ export default function VideoPlayer({ onAnalysisComplete }) {
                   </label>
                 </div>
               </div>
+
+              {goalkeeper && (
+                <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-orange-500">
+                  <label className="block text-sm text-gray-400 mb-2">{getGoalkeeperTitle()}</label>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-5 h-5 rounded-full border-2 border-orange-400"
+                      style={getTeamColorStyle(goalkeeper.color_bgr)}
+                    />
+                    <span className="text-orange-400">{goalkeeper.color_name} jersey</span>
+                    <span className="text-gray-500">|</span>
+                    <span className="text-gray-400 text-sm">{getGoalkeeperDescription()}</span>
+                  </div>
+                </div>
+              )}
 
               <div className="mb-4 p-3 bg-gray-800 rounded-lg">
                 <label className="block text-sm text-gray-400 mb-2">Attack Direction</label>

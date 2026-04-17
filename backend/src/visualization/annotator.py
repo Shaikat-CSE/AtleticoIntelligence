@@ -14,6 +14,8 @@ class PitchVisualizer:
         bbox_thickness: int = 2,
         attacker_color: Tuple[int, int, int] = (255, 0, 0),
         defender_color: Tuple[int, int, int] = (0, 0, 255),
+        goalkeeper_color: Tuple[int, int, int] = (0, 165, 255),
+        referee_color: Tuple[int, int, int] = (192, 192, 192),
         ball_color: Tuple[int, int, int] = (0, 255, 0),
         text_color: Tuple[int, int, int] = (255, 255, 255),
     ):
@@ -22,6 +24,8 @@ class PitchVisualizer:
         self.bbox_thickness = bbox_thickness
         self.attacker_color = attacker_color
         self.defender_color = defender_color
+        self.goalkeeper_color = goalkeeper_color
+        self.referee_color = referee_color
         self.ball_color = ball_color
         self.text_color = text_color
 
@@ -32,13 +36,20 @@ class PitchVisualizer:
         offside_result: OffsideAnalysisResult,
         team1: List[BoundingBox],
         team2: List[BoundingBox],
-        output_filename: str = "annotated_frame.jpg"
+        output_filename: str = "annotated_frame.jpg",
+        attacking_team: str = "team1"
     ) -> str:
         annotated = image.copy()
         h, w = annotated.shape[:2]
 
         for player in detection_result.players:
-            self._draw_player_bbox(annotated, player, team1, team2)
+            self._draw_player_bbox(annotated, player, team1, team2, attacking_team)
+
+        if offside_result and offside_result.goalkeeper:
+            self._draw_special_bbox(annotated, offside_result.goalkeeper, self.goalkeeper_color, "GK")
+
+        for referee in getattr(detection_result, "referees", []):
+            self._draw_special_bbox(annotated, referee, self.referee_color, "REF")
 
         if detection_result.ball:
             self._draw_ball_bbox(annotated, detection_result.ball)
@@ -60,11 +71,14 @@ class PitchVisualizer:
         player: BoundingBox,
         team1: List[BoundingBox],
         team2: List[BoundingBox],
+        attacking_team: str = "team1"
     ):
-        if player in team1:
+        is_attacking = (attacking_team == "team1" and player in team1) or (attacking_team == "team2" and player in team2)
+        
+        if is_attacking:
             color = self.attacker_color
             label = "ATT"
-        elif player in team2:
+        elif player in team1 or player in team2:
             color = self.defender_color
             label = "DEF"
         else:
@@ -85,6 +99,27 @@ class PitchVisualizer:
         )
 
         foot_x, foot_y = int(player.foot_position[0]), int(player.foot_position[1])
+        cv2.circle(image, (foot_x, foot_y), 5, color, -1)
+
+    def _draw_special_bbox(
+        self,
+        image: np.ndarray,
+        bbox: BoundingBox,
+        color: Tuple[int, int, int],
+        label: str
+    ):
+        x1, y1, x2, y2 = int(bbox.x1), int(bbox.y1), int(bbox.x2), int(bbox.y2)
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, self.bbox_thickness)
+        cv2.putText(
+            image,
+            label,
+            (x1, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1
+        )
+        foot_x, foot_y = int(bbox.foot_position[0]), int(bbox.foot_position[1])
         cv2.circle(image, (foot_x, foot_y), 5, color, -1)
 
     def _draw_ball_bbox(self, image: np.ndarray, ball: BoundingBox):
@@ -245,11 +280,12 @@ def annotate_frame(
     offside_result: Optional[OffsideAnalysisResult],
     team1: List[BoundingBox],
     team2: List[BoundingBox],
-    output_filename: str = "annotated_frame.jpg"
+    output_filename: str = "annotated_frame.jpg",
+    attacking_team: str = "team1"
 ) -> str:
     visualizer = PitchVisualizer()
     return visualizer.annotate_frame(
-        image, detection_result, offside_result, team1, team2, output_filename
+        image, detection_result, offside_result, team1, team2, output_filename, attacking_team
     )
 
 
