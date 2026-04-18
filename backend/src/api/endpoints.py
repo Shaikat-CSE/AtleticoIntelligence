@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Tuple
 from pathlib import Path
@@ -103,6 +103,10 @@ class DetectorState:
 
 
 detector_state = DetectorState()
+
+
+def _build_asset_url(request: Request, route_name: str, filename: str) -> str:
+    return str(request.url_for(route_name, path=filename))
 
 def _compute_team_info_from_players(players: List[BoundingBox], image: np.ndarray):
     if not players:
@@ -477,6 +481,7 @@ async def detect_teams(image_file: UploadFile = File(...)):
 
 @router.post("/analyze-offside", response_model=OffsideResponse)
 async def analyze_offside_endpoint(
+    request: Request,
     image_file: UploadFile = File(...),
     attacking_team: str = Form(...),
     goal_direction: str = Form("right")
@@ -699,13 +704,17 @@ async def analyze_offside_endpoint(
     annotated_filename = f"annotated_{file_id}.jpg"
     annotated_path = ANNOTATED_DIR / annotated_filename
     
-    result_path = annotate_frame(
-        image, detection_result, offside_result, team1, team2,
-        output_filename=str(annotated_path),
-        attacking_team=offside_result.attacking_team
-    )
+    try:
+        result_path = annotate_frame(
+            image, detection_result, offside_result, team1, team2,
+            output_filename=str(annotated_path),
+            attacking_team=offside_result.attacking_team
+        )
+    except OSError as exc:
+        logger.exception("[Output] Failed to save annotated offside image")
+        raise HTTPException(status_code=500, detail="Failed to save annotated offside image") from exc
     logger.info(f"[Output] Annotated image saved: {result_path}")
-    annotated_url = f"/annotated/{annotated_filename}"
+    annotated_url = _build_asset_url(request, "annotated", annotated_filename)
     
     svg_filename = f"pitch_{file_id}_{goal_direction}_{int(uuid.uuid4().time)}.svg"
     svg_path = OUTPUT_DIR / svg_filename
@@ -755,7 +764,7 @@ async def analyze_offside_endpoint(
         goal_direction=goal_direction
     )
     logger.info(f"[Output] SVG saved: {svg_path}")
-    svg_url = f"/pitch/{svg_filename}"
+    svg_url = _build_asset_url(request, "pitch", svg_filename)
     
     def safe_float(val):
         if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
@@ -817,6 +826,7 @@ async def analyze_offside_endpoint(
 
 @router.post("/check-goal", response_model=GoalCheckResponse)
 async def check_goal_endpoint(
+    request: Request,
     image_file: UploadFile = File(...),
     goal_direction: str = Form("right")
 ):
@@ -847,12 +857,16 @@ async def check_goal_endpoint(
     file_id = str(uuid.uuid4())[:8]
     annotated_filename = f"goalcheck_{file_id}.jpg"
     annotated_path = ANNOTATED_DIR / annotated_filename
-    result_path = annotate_goal_check(
-        image,
-        detection_result,
-        goal_result,
-        output_filename=str(annotated_path)
-    )
+    try:
+        result_path = annotate_goal_check(
+            image,
+            detection_result,
+            goal_result,
+            output_filename=str(annotated_path)
+        )
+    except OSError as exc:
+        logger.exception("[Goal Check] Failed to save annotated goal image")
+        raise HTTPException(status_code=500, detail="Failed to save annotated goal image") from exc
     logger.info(f"[Goal Check] Annotated image saved: {result_path}")
 
     ball_position = None
@@ -876,7 +890,7 @@ async def check_goal_endpoint(
         goalpost_source=goal_result.goalpost_source,
         ball_detected=bool(goal_result.ball is not None),
         ball_position=ball_position,
-        annotated_image_url=f"/annotated/{annotated_filename}"
+        annotated_image_url=_build_asset_url(request, "annotated", annotated_filename)
     )
 
 

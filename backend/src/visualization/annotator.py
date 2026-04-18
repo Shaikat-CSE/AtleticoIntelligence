@@ -7,6 +7,13 @@ from ..detection import BoundingBox
 from ..logic import OffsideAnalysisResult, GoalCheckResult
 
 
+def _write_image_or_raise(output_path: Path, image: np.ndarray) -> str:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(output_path), image):
+        raise OSError(f"Failed to write annotated image to {output_path}")
+    return str(output_path)
+
+
 class PitchVisualizer:
     def __init__(
         self,
@@ -61,9 +68,7 @@ class PitchVisualizer:
         if not output_path.is_absolute():
             output_path = self.output_dir / output_filename
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), annotated)
-        return str(output_path)
+        return _write_image_or_raise(output_path, annotated)
 
     def annotate_goal_check(
         self,
@@ -162,9 +167,7 @@ class PitchVisualizer:
         if not output_path.is_absolute():
             output_path = self.output_dir / output_filename
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), annotated)
-        return str(output_path)
+        return _write_image_or_raise(output_path, annotated)
 
     def _draw_player_bbox(
         self,
@@ -370,9 +373,7 @@ class PitchVisualizer:
         if not output_path.is_absolute():
             output_path = self.output_dir / output_filename
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), annotated)
-        return str(output_path)
+        return _write_image_or_raise(output_path, annotated)
 
 
 def annotate_frame(
